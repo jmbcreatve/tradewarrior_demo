@@ -1,0 +1,89 @@
+{
+  "equity": 10000.0,
+  "gpt_call_timestamps": [
+    1764215943.798098,
+    1764215946.8231552,
+    1764215949.84528
+  ],
+  "gpt_state_note": "demo: no GPT key",
+  "last_gpt_call_walltime": 1764215949.84528,
+  "last_gpt_decision": {
+    "action": "flat",
+    "confidence": 0.0,
+    "notes": "demo: no GPT key"
+  },
+  "last_gpt_snapshot": {
+    "danger_mode": false,
+    "price": 29417.78830874889,
+    "range_position": "mid",
+    "shape_bias": "bear",
+    "shape_score": 0.3,
+    "timestamp": 1764215889.0,
+    "trend": "down",
+    "volatility_mode": "normal"
+  },
+  "max_drawdown": 0.0,
+  "open_positions_summary": [],
+  "prev_snapshot": {
+    "danger_mode": false,
+    "fib_context": {
+      "macro_zone": "unknown",
+      "micro_zone": "unknown"
+    },
+    "flow": {
+      "funding": -0.007634123579822237,
+      "funding_trend": "unknown",
+      "oi_trend": "unknown",
+      "open_interest": 3658.5022149328797,
+      "skew": -0.32640393998167294,
+      "skew_bias": "unknown"
+    },
+    "gpt_state_note": "demo: no GPT key",
+    "liquidity_context": {
+      "liquidity_above": null,
+      "liquidity_below": null
+    },
+    "microstructure": {
+      "bos_direction": "down",
+      "choch_direction": "none",
+      "compression_active": false,
+      "displacement_down": true,
+      "displacement_up": false,
+      "eq_high_cluster": false,
+      "eq_low_cluster": false,
+      "fract_high": true,
+      "fract_low": true,
+      "fvg_down": true,
+      "fvg_up": false,
+      "order_block_bias": "bear",
+      "shape_bias": "bear",
+      "shape_score": 0.3,
+      "sweep_down": false,
+      "sweep_up": false,
+      "wick_exhaustion_down": false,
+      "wick_exhaustion_up": false
+    },
+    "price": 29417.78830874889,
+    "range_position": "mid",
+    "recent_price_path": {
+      "impulse_state": "ripping_up",
+      "lookback_bars": 100,
+      "ret_1": -0.0006086459328458846,
+      "ret_15": 0.012883679611308863,
+      "ret_5": 0.007024135497198249
+    },
+    "risk_context": {
+      "equity": 10000.0,
+      "last_action": "flat",
+      "last_confidence": 0.0,
+      "max_drawdown": 0.0,
+      "open_positions_summary": []
+    },
+    "symbol": "None",
+    "timestamp": 1764215889.0,
+    "timing_state": "unknown",
+    "trend": "down",
+    "volatility_mode": "normal"
+  },
+  "symbol": null
+}
