@@ -1,12 +1,11 @@
 {
   "equity": 10000.0,
   "gpt_call_timestamps": [
-    1764215943.798098,
-    1764215946.8231552,
-    1764215949.84528
+    1764469256.4713058,
+    1764469262.484305
   ],
   "gpt_state_note": "demo: no GPT key",
-  "last_gpt_call_walltime": 1764215949.84528,
+  "last_gpt_call_walltime": 1764469262.484305,
   "last_gpt_decision": {
     "action": "flat",
     "confidence": 0.0,
@@ -14,11 +13,11 @@
   },
   "last_gpt_snapshot": {
     "danger_mode": false,
-    "price": 29417.78830874889,
+    "price": 29815.611176404,
     "range_position": "mid",
     "shape_bias": "bear",
     "shape_score": 0.3,
-    "timestamp": 1764215889.0,
+    "timestamp": 1764469202.0,
     "trend": "down",
     "volatility_mode": "normal"
   },
@@ -31,11 +30,11 @@
       "micro_zone": "unknown"
     },
     "flow": {
-      "funding": -0.007634123579822237,
+      "funding": 0.002670980766859527,
       "funding_trend": "unknown",
       "oi_trend": "unknown",
-      "open_interest": 3658.5022149328797,
-      "skew": -0.32640393998167294,
+      "open_interest": 4599.2131621200715,
+      "skew": -0.2511135618557363,
       "skew_bias": "unknown"
     },
     "gpt_state_note": "demo: no GPT key",
@@ -51,7 +50,7 @@
       "displacement_up": false,
       "eq_high_cluster": false,
       "eq_low_cluster": false,
-      "fract_high": true,
+      "fract_high": false,
       "fract_low": true,
       "fvg_down": true,
       "fvg_up": false,
@@ -63,14 +62,14 @@
       "wick_exhaustion_down": false,
       "wick_exhaustion_up": false
     },
-    "price": 29417.78830874889,
+    "price": 29815.611176404,
     "range_position": "mid",
     "recent_price_path": {
-      "impulse_state": "ripping_up",
+      "impulse_state": "chop",
       "lookback_bars": 100,
-      "ret_1": -0.0006086459328458846,
-      "ret_15": 0.012883679611308863,
-      "ret_5": 0.007024135497198249
+      "ret_1": -0.00022487616440677134,
+      "ret_15": 0.0037915755380080064,
+      "ret_5": -0.0034991844925723616
     },
     "risk_context": {
       "equity": 10000.0,
@@ -79,11 +78,11 @@
       "max_drawdown": 0.0,
       "open_positions_summary": []
     },
-    "symbol": "None",
-    "timestamp": 1764215889.0,
+    "symbol": "BTCUSDT",
+    "timestamp": 1764469202.0,
     "timing_state": "unknown",
     "trend": "down",
     "volatility_mode": "normal"
   },
-  "symbol": null
+  "symbol": "BTCUSDT"
 }

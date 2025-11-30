@@ -30,6 +30,12 @@ DEFAULT_STATE: Dict[str, Any] = {
 }
 
 
+def _fresh_state(config: Config) -> Dict[str, Any]:
+    state = dict(DEFAULT_STATE)
+    state["symbol"] = config.symbol
+    return state
+
+
 def load_state(config: Config) -> Dict[str, Any]:
     """Load state from disk and merge it with DEFAULT_STATE.
 
@@ -37,21 +43,23 @@ def load_state(config: Config) -> Dict[str, Any]:
     """
     path = config.state_file
     if not os.path.exists(path):
-        return dict(DEFAULT_STATE)
+        return _fresh_state(config)
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to load state from %s: %s", path, exc)
-        return dict(DEFAULT_STATE)
+        return _fresh_state(config)
 
     if not isinstance(data, dict):
         logger.warning("State file %s did not contain a dict; resetting.", path)
-        return dict(DEFAULT_STATE)
+        return _fresh_state(config)
 
     state = dict(DEFAULT_STATE)
     state.update(data or {})
+    if not state.get("symbol"):
+        state["symbol"] = config.symbol
     return state
 
 
