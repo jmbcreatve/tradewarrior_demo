@@ -1,4 +1,0 @@
-Host phase3
-    HostName 46.62.235.104
-    User root
-    IdentityFile ~/.ssh/id_ed25519
