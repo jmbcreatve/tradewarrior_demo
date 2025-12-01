@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import List
 
+from enums import ExecutionMode
+
 
 @dataclass
 class Config:
@@ -28,6 +30,7 @@ class Config:
     backup_execution_ids: List[str] = field(default_factory=list)
 
     # Modes
+    execution_mode: ExecutionMode = ExecutionMode.SIM
     paper_trading: bool = True
 
     # GPT / brain config (model + token cap). Model can be overridden via env var.

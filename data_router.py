@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional
 
 from config import Config
+from enums import ExecutionMode
 from adapters.base_data_adapter import BaseDataAdapter
 from adapters.base_execution_adapter import BaseExecutionAdapter
 from adapters.mock_data_adapter import MockDataAdapter
@@ -13,18 +14,54 @@ logger = get_logger(__name__)
 
 
 def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
+    """Construct data adapters based on config.
+
+    For now we always build mock + example adapters. ExecutionMode only gates
+    which modes are allowed; real HL adapters will be added later.
+    """
+    if config.execution_mode == ExecutionMode.HL_MAINNET:
+        # Hard safety rail: we do not support live-mainnet yet.
+        raise RuntimeError(
+            "ExecutionMode.HL_MAINNET is not supported yet; refusing to build data adapters."
+        )
+
     adapters: Dict[str, BaseDataAdapter] = {
         "mock": MockDataAdapter(),
         "example": ExampleDataAdapter(),
     }
+
+    if config.execution_mode == ExecutionMode.HL_TESTNET:
+        logger.warning(
+            "ExecutionMode.HL_TESTNET selected but no Hyperliquid data adapter "
+            "is wired yet; using mock/example adapters only."
+        )
+
     return adapters
 
 
 def build_execution_adapters(config: Config) -> Dict[str, BaseExecutionAdapter]:
+    """Construct execution adapters based on config.
+
+    For now we always build mock + example adapters. ExecutionMode only gates
+    which modes are allowed; real HL adapters will be added later.
+    """
+    if config.execution_mode == ExecutionMode.HL_MAINNET:
+        # Hard safety rail: we do not support live-mainnet yet.
+        raise RuntimeError(
+            "ExecutionMode.HL_MAINNET is not supported yet; refusing to build execution adapters."
+        )
+
     adapters: Dict[str, BaseExecutionAdapter] = {
         "mock": MockExecutionAdapter(),
         "example": ExampleExecutionAdapter(),
     }
+
+    if config.execution_mode == ExecutionMode.HL_TESTNET:
+        logger.warning(
+            "ExecutionMode.HL_TESTNET selected but no Hyperliquid execution adapter "
+            "is wired yet; using mock/example adapters only."
+        )
+
     return adapters
 
 
