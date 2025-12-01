@@ -162,6 +162,63 @@ def generate_mock_candles(symbol: str, timeframe: str, limit: int = 300, start_p
     return adapter.fetch_recent_candles(symbol=symbol, timeframe=timeframe, limit=limit)
 
 
+def _write_replay_exports(
+    result: Dict[str, Any],
+    config: Config,
+    out_dir: str,
+) -> None:
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    symbol = str(getattr(config, "symbol", "unknown"))
+    timeframe = str(getattr(config, "timeframe", "unknown"))
+
+    trades_path = out_path / f"trades_{symbol}_{timeframe}.csv"
+    equity_path = out_path / f"equity_{symbol}_{timeframe}.csv"
+
+    trade_fields = [
+        "side",
+        "entry_price",
+        "exit_price",
+        "size",
+        "entry_ts",
+        "exit_ts",
+        "pnl",
+        "return_pct",
+        "exit_reason",
+    ]
+    trades = result.get("trades") or []
+    defaults = {
+        "side": "",
+        "entry_price": 0,
+        "exit_price": 0,
+        "size": 0,
+        "entry_ts": 0,
+        "exit_ts": 0,
+        "pnl": 0,
+        "return_pct": 0,
+        "exit_reason": "",
+    }
+
+    with trades_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=trade_fields)
+        writer.writeheader()
+        for trade in trades:
+            row = {field: defaults[field] for field in trade_fields}
+            if isinstance(trade, dict):
+                for field in trade_fields:
+                    value = trade.get(field, defaults[field])
+                    row[field] = value if value not in {None, ""} else defaults[field]
+            writer.writerow(row)
+
+    equity_curve = result.get("equity_curve") or []
+    with equity_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["step", "equity"])
+        for idx, equity in enumerate(equity_curve):
+            writer.writerow([idx, equity])
+
+
 # ---------------------------------------------------------------------------
 # Core replay harness
 # ---------------------------------------------------------------------------
@@ -340,6 +397,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=300, help="Number of candles to generate when using mock data")
     parser.add_argument("--start-price", type=float, default=30_000.0, help="Starting price for mock data generation")
     parser.add_argument("--stub", action="store_true", help="Use deterministic GPT stub instead of live GPT")
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default="analytics",
+        help="Directory to write replay exports (trades/equity).",
+    )
     return parser.parse_args()
 
 
@@ -354,3 +417,5 @@ if __name__ == "__main__":
 
     result = run_replay(cfg, candles, use_gpt_stub=args.stub)
     _print_summary(result["stats"])
+    _write_replay_exports(result, cfg, args.out_dir)
+    print(f"Replay exports written to {args.out_dir}")

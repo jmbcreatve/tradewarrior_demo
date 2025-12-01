@@ -102,48 +102,9 @@ def evaluate_risk(
     gpt = _norm_gpt_decision(gpt_decision)
     action = gpt["action"]
     confidence = gpt["confidence"]
-
-    if action == "flat":
-        logger.info("Risk: GPT requested FLAT; no trade.")
-        return RiskDecision(
-            approved=False,
-            side=Side.FLAT.value,
-            position_size=0.0,
-            leverage=0.0,
-            stop_loss_price=None,
-            take_profit_price=None,
-            reason="gpt_flat",
-        )
-
-    # --- Basic market sanity checks -------------------------------------------
+    symbol = snapshot.get("symbol")
+    timestamp = snapshot.get("timestamp")
     price = _get_float(snapshot, "price", 0.0)
-    if price <= 0.0:
-        logger.info("Risk: invalid or zero price; no trade.")
-        return RiskDecision(
-            approved=False,
-            side=Side.FLAT.value,
-            position_size=0.0,
-            leverage=0.0,
-            stop_loss_price=None,
-            take_profit_price=None,
-            reason="invalid_price",
-        )
-
-    # --- Equity / risk budget -------------------------------------------------
-    equity = _get_float(state, "equity", 10_000.0)
-    if equity <= 0.0:
-        logger.info("Risk: non-positive equity; no trade.")
-        return RiskDecision(
-            approved=False,
-            side=Side.FLAT.value,
-            position_size=0.0,
-            leverage=0.0,
-            stop_loss_price=None,
-            take_profit_price=None,
-            reason="no_equity",
-        )
-
-    # --- Regime modifiers from snapshot --------------------------------------
     vol_enum = coerce_enum(
         str(snapshot.get("volatility_mode", "unknown")),
         VolatilityMode,
@@ -160,11 +121,81 @@ def evaluate_risk(
         TimingState.NORMAL,
     )
     danger_mode = bool(snapshot.get("danger_mode", False))
+    effective_env: RiskEnvelope | None = None
+
+    def _log_risk_event(decision: RiskDecision, env: RiskEnvelope | None) -> None:
+        try:
+            event = {
+                "type": "risk_decision",
+                "symbol": symbol,
+                "timestamp": timestamp,
+                "price": price,
+                "gpt_action": action,
+                "gpt_confidence": confidence,
+                "approved": decision.approved,
+                "side": decision.side,
+                "position_size": decision.position_size,
+                "leverage": decision.leverage,
+                "stop_loss_price": decision.stop_loss_price,
+                "take_profit_price": decision.take_profit_price,
+                "reason": decision.reason,
+                "env_max_notional": env.max_notional if env else None,
+                "env_max_leverage": env.max_leverage if env else None,
+                "env_max_risk_pct": env.max_risk_per_trade_pct if env else None,
+                "danger_mode": danger_mode,
+                "timing_state": timing_enum.value if isinstance(timing_enum, TimingState) else timing_enum,
+            }
+            logger.info("RiskDecision event: %s", event)
+        except Exception:
+            logger.info("RiskDecision event logging failed", exc_info=True)
+
+    if action == "flat":
+        logger.info("Risk: GPT requested FLAT; no trade.")
+        decision = RiskDecision(
+            approved=False,
+            side=Side.FLAT.value,
+            position_size=0.0,
+            leverage=0.0,
+            stop_loss_price=None,
+            take_profit_price=None,
+            reason="gpt_flat",
+        )
+        _log_risk_event(decision, effective_env)
+        return decision
+
+    # --- Basic market sanity checks -------------------------------------------
+    if price <= 0.0:
+        logger.info("Risk: invalid or zero price; no trade.")
+        decision = RiskDecision(
+            approved=False,
+            side=Side.FLAT.value,
+            position_size=0.0,
+            leverage=0.0,
+            stop_loss_price=None,
+            take_profit_price=None,
+            reason="invalid_price",
+        )
+        _log_risk_event(decision, effective_env)
+        return decision
+
+    # --- Equity / risk budget -------------------------------------------------
+    equity = _get_float(state, "equity", 10_000.0)
+    if equity <= 0.0:
+        logger.info("Risk: non-positive equity; no trade.")
+        decision = RiskDecision(
+            approved=False,
+            side=Side.FLAT.value,
+            position_size=0.0,
+            leverage=0.0,
+            stop_loss_price=None,
+            take_profit_price=None,
+            reason="no_equity",
+        )
+        _log_risk_event(decision, effective_env)
+        return decision
 
     # --- Risk envelope (downward-only caps) ----------------------------------
     risk_env_dict = snapshot.get("risk_envelope") or None
-    effective_env: RiskEnvelope
-
     if isinstance(risk_env_dict, dict) and risk_env_dict:
         def _env_float(key: str) -> float:
             try:
@@ -205,7 +236,7 @@ def evaluate_risk(
             allowed_max_lev,
             env_max_notional,
         )
-        return RiskDecision(
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
@@ -214,6 +245,8 @@ def evaluate_risk(
             take_profit_price=None,
             reason="risk envelope forbids new exposure",
         )
+        _log_risk_event(decision, effective_env)
+        return decision
 
     base_risk_pct = cfg_risk_pct
     # Start with GPT confidence scaling risk within [0, allowed_risk_pct]
@@ -258,7 +291,7 @@ def evaluate_risk(
             timing_enum,
             danger_mode,
         )
-        return RiskDecision(
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
@@ -267,6 +300,8 @@ def evaluate_risk(
             take_profit_price=None,
             reason="risk_zero",
         )
+        _log_risk_event(decision, effective_env)
+        return decision
 
     # --- Position sizing ------------------------------------------------------
     stop_pct = _vol_stop_pct(vol_enum)
@@ -289,7 +324,7 @@ def evaluate_risk(
     qty = (dollar_risk * leverage) / (price * stop_pct)
     if qty <= 0.0:
         logger.info("Risk: computed position size <= 0; no trade.")
-        return RiskDecision(
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
@@ -298,6 +333,8 @@ def evaluate_risk(
             take_profit_price=None,
             reason="qty_zero",
         )
+        _log_risk_event(decision, effective_env)
+        return decision
 
     # Global notional cap: never risk more than X% equity notionally.
     max_notional_pct = 0.05
@@ -342,7 +379,7 @@ def evaluate_risk(
         timing_enum,
     )
 
-    return RiskDecision(
+    decision = RiskDecision(
         approved=True,
         side=side_str,
         position_size=qty,
@@ -351,3 +388,5 @@ def evaluate_risk(
         take_profit_price=take_profit,
         reason="risk_rules_v2",
     )
+    _log_risk_event(decision, effective_env)
+    return decision

@@ -17,3 +17,11 @@ __pycache__/
 .idea/
 .DS_Store
 state.json
+
+# Hyperliquid config / secrets (env or json)
+hyperliquid_*.env
+hyperliquid_*.json
+hl_*.env
+hl_*.json
+hl_keys.*
+twp3_testnet.env
