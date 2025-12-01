@@ -1,4 +1,6 @@
-from typing import Dict, Any, List, Optional
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 
 from config import Config
 from enums import ExecutionMode
@@ -8,17 +10,15 @@ from adapters.mock_data_adapter import MockDataAdapter
 from adapters.mock_execution_adapter import MockExecutionAdapter
 from adapters.example_data_adapter import ExampleDataAdapter
 from adapters.example_execution_adapter import ExampleExecutionAdapter
+from adapters.liqdata import HyperliquidDataAdapter
+from adapters.liqexec import HyperliquidExecutionAdapter
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
 
 def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
-    """Construct data adapters based on config.
-
-    For now we always build mock + example adapters. ExecutionMode only gates
-    which modes are allowed; real HL adapters will be added later.
-    """
+    """Construct data adapters based on config and execution mode."""
     if config.execution_mode == ExecutionMode.HL_MAINNET:
         # Hard safety rail: we do not support live-mainnet yet.
         raise RuntimeError(
@@ -31,20 +31,18 @@ def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
     }
 
     if config.execution_mode == ExecutionMode.HL_TESTNET:
+        adapters["hl"] = HyperliquidDataAdapter()
         logger.warning(
-            "ExecutionMode.HL_TESTNET selected but no Hyperliquid data adapter "
-            "is wired yet; using mock/example adapters only."
+            "ExecutionMode.HL_TESTNET selected; HyperliquidDataAdapter is wired "
+            "but health_check currently returns False, so router will fall back "
+            "to mock/example until real connectivity is implemented."
         )
 
     return adapters
 
 
 def build_execution_adapters(config: Config) -> Dict[str, BaseExecutionAdapter]:
-    """Construct execution adapters based on config.
-
-    For now we always build mock + example adapters. ExecutionMode only gates
-    which modes are allowed; real HL adapters will be added later.
-    """
+    """Construct execution adapters based on config and execution mode."""
     if config.execution_mode == ExecutionMode.HL_MAINNET:
         # Hard safety rail: we do not support live-mainnet yet.
         raise RuntimeError(
@@ -57,9 +55,11 @@ def build_execution_adapters(config: Config) -> Dict[str, BaseExecutionAdapter]:
     }
 
     if config.execution_mode == ExecutionMode.HL_TESTNET:
+        adapters["hl"] = HyperliquidExecutionAdapter()
         logger.warning(
-            "ExecutionMode.HL_TESTNET selected but no Hyperliquid execution adapter "
-            "is wired yet; using mock/example adapters only."
+            "ExecutionMode.HL_TESTNET selected; HyperliquidExecutionAdapter is wired "
+            "but health_check currently returns False, so router will fall back "
+            "to mock/example until real connectivity is implemented."
         )
 
     return adapters
@@ -75,7 +75,9 @@ def get_market_data(
     If primary health_check fails or raises, fall back to backups, then mock.
     DEMO mode: always safe; never crashes on adapter failure.
     """
-    order: List[str] = [config.primary_data_source_id] + list(config.backup_data_source_ids)
+    order: List[str] = [config.primary_data_source_id] + list(
+        config.backup_data_source_ids
+    )
     used_adapter: Optional[BaseDataAdapter] = None
 
     for adapter_id in order:
