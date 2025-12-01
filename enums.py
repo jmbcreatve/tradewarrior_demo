@@ -53,6 +53,19 @@ class Side(Enum):
     FLAT = "flat"
 
 
+class ExecutionMode(Enum):
+    """
+    High-level execution wiring mode.
+
+    SIM        -> Pure mock adapters (no real network).
+    HL_TESTNET -> Hyperliquid testnet (real venue, play money).
+    HL_MAINNET -> Hyperliquid mainnet (real capital) – currently disabled.
+    """
+    SIM = "sim"
+    HL_TESTNET = "hl_testnet"
+    HL_MAINNET = "hl_mainnet"
+
+
 def enum_to_str(value: Enum) -> str:
     """Convert an Enum to its snapshot string representation."""
     return value.value if isinstance(value, Enum) else str(value)

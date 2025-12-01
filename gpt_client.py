@@ -34,9 +34,39 @@ def _load_brain_prompt() -> str:
         return _BRAIN_PROMPT_CACHE
 
 
+def _safe_float(value: Any, default: float) -> float:
+    """Coerce a value to float with a safe default."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _build_user_message(snapshot: Dict[str, Any]) -> str:
-    """User message is just the raw snapshot JSON."""
-    return json.dumps(snapshot, separators=(",", ":"), sort_keys=True)
+    """Build a human-readable risk envelope summary plus the full snapshot JSON."""
+    risk_env = snapshot.get("risk_envelope") or {}
+
+    max_notional = _safe_float(risk_env.get("max_notional"), 0.0)
+    max_leverage = _safe_float(risk_env.get("max_leverage"), 0.0)
+    max_risk_per_trade_pct = _safe_float(risk_env.get("max_risk_per_trade_pct"), 0.0)
+    min_stop = _safe_float(risk_env.get("min_stop_distance_pct"), 0.0)
+    max_stop = _safe_float(risk_env.get("max_stop_distance_pct"), 0.0)
+    max_daily_loss_pct = _safe_float(risk_env.get("max_daily_loss_pct"), 0.0)
+    note = str(risk_env.get("note", "n/a"))
+
+    summary = (
+        "RISK ENVELOPE (limits you MUST respect):\n"
+        f"- max_notional: {max_notional}\n"
+        f"- max_leverage: {max_leverage}\n"
+        f"- max_risk_per_trade_pct: {max_risk_per_trade_pct}\n"
+        f"- min_stop_distance_pct: {min_stop}\n"
+        f"- max_stop_distance_pct: {max_stop}\n"
+        f"- max_daily_loss_pct: {max_daily_loss_pct}\n"
+        f"- note: {note}\n\n"
+        "SNAPSHOT JSON:\n"
+    )
+
+    return summary + json.dumps(snapshot, sort_keys=True)
 
 
 def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:

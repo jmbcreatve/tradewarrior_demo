@@ -1,194 +1,229 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
+from enums import VolatilityMode, RangePosition, TimingState, coerce_enum
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
 
-# --- Cost protection (NO fixed delay, just hourly cap) -----------------------
+# ---------------------------------------------------------------------------
+# Tuning knobs – safe, conservative defaults
+# ---------------------------------------------------------------------------
 
-GPT_HOURLY_WINDOW_SECONDS = 60.0 * 60.0
-MAX_GPT_CALLS_PER_HOUR = 40  # hard safety rail
+MAX_GPT_CALLS_PER_HOUR = 12          # hard cap per rolling hour
+MIN_SECONDS_BETWEEN_CALLS = 60       # min wall-clock spacing
+MIN_PRICE_MOVE_PCT = 0.001           # 0.1% move since last GPT snapshot
 
-# How different price must be from the last GPT call before we bother again.
-MIN_PRICE_MOVE_PCT_FROM_LAST_CALL = 0.001  # 0.1% (was 0.3%)
-
-# What we consider a “strong enough” microstructure impulse for DEMO data.
-STRONG_SHAPE_SCORE = 0.3  # DEMO mostly uses 0.3 and 0.7; 0.3 is now allowed
+# "Interesting setup" definition
+MIN_SHAPE_SCORE = 0.3                # how strong microstructure must be
+EXTREME_RANGE_WEIGHT = 0.1           # extra price-move tolerance at extremes
 
 
-def _get_float(value: Any, default: float = 0.0) -> float:
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _get_float(d: Dict[str, Any], key: str, default: float = 0.0) -> float:
     try:
-        return float(value)
+        return float(d.get(key, default) or default)
     except (TypeError, ValueError):
         return default
 
 
 def _extract_core_features(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Pull out the fields we care about for gating."""
+    """Pull out just what gatekeeper cares about from the snapshot dict."""
     micro = snapshot.get("microstructure") or {}
+    recent = snapshot.get("recent_price_path") or {}
+
+    price = _get_float(snapshot, "price", 0.0)
+    vol_raw = snapshot.get("volatility_mode", "unknown")
+    vol_enum = coerce_enum(str(vol_raw), VolatilityMode, VolatilityMode.UNKNOWN)
+
+    range_raw = snapshot.get("range_position", "mid")
+    range_enum = coerce_enum(str(range_raw), RangePosition, RangePosition.MID)
+
+    timing_raw = snapshot.get("timing_state", "normal")
+    timing_enum = coerce_enum(str(timing_raw), TimingState, TimingState.NORMAL)
+
+    shape_bias = str(micro.get("shape_bias", "none"))
+    try:
+        shape_score = float(micro.get("shape_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        shape_score = 0.0
+
+    impulse_state = str(recent.get("impulse_state", "unknown"))
+    danger_mode = bool(snapshot.get("danger_mode", False))
 
     return {
-        "timestamp": _get_float(snapshot.get("timestamp"), 0.0),
-        "price": _get_float(snapshot.get("price"), 0.0),
-        "trend": (snapshot.get("trend") or "unknown").lower(),
-        "range_position": (snapshot.get("range_position") or "unknown").lower(),
-        "volatility_mode": (snapshot.get("volatility_mode") or "unknown").lower(),
-        "danger_mode": bool(snapshot.get("danger_mode")),
-        "shape_bias": (micro.get("shape_bias") or "none").lower(),
-        "shape_score": _get_float(micro.get("shape_score"), 0.0),
+        "price": price,
+        "vol_mode": vol_enum,
+        "range_pos": range_enum,
+        "timing_state": timing_enum,
+        "shape_bias": shape_bias,
+        "shape_score": shape_score,
+        "impulse_state": impulse_state,
+        "danger_mode": danger_mode,
     }
 
 
-def _update_call_timestamps(state: Dict[str, Any], now_wall: float) -> None:
-    calls = [
-        _get_float(t)
-        for t in state.get("gpt_call_timestamps", [])
-        if now_wall - _get_float(t) < GPT_HOURLY_WINDOW_SECONDS
-    ]
-    calls.append(now_wall)
-    state["gpt_call_timestamps"] = calls
-    state["last_gpt_call_walltime"] = now_wall
+def _price_move_pct(cur_price: float, ref_price: float) -> float:
+    if cur_price <= 0 or ref_price <= 0:
+        return 0.0
+    return abs(cur_price - ref_price) / ref_price
 
 
-def _is_potential_setup(features: Dict[str, Any]) -> bool:
-    """Heuristic: is this a *candidate* long/short window?
+def _prune_old_timestamps(timestamps: Any, now_ts: float) -> list[float]:
+    """Keep only timestamps in the last 3600s."""
+    if not isinstance(timestamps, (list, tuple)):
+        return []
+    cutoff = now_ts - 3600.0
+    cleaned: list[float] = []
+    for t in timestamps:
+        try:
+            ft = float(t)
+        except (TypeError, ValueError):
+            continue
+        if ft >= cutoff:
+            cleaned.append(ft)
+    return cleaned
 
-    This version is deliberately more permissive for DEMO:
-    - allows shape_score >= 0.3
-    - allows mids as well as extremes
-    """
 
-    if features["danger_mode"]:
-        # Later we can add special "panic / hedge" logic; for now, avoid.
+def _is_candidate_setup(cur: Dict[str, Any], prev: Optional[Dict[str, Any]]) -> bool:
+    """Decide if the microstructure / regime suggests a potential setup."""
+    shape_score = cur["shape_score"]
+    shape_bias = cur["shape_bias"]
+    range_enum = cur["range_pos"]
+    vol_enum = cur["vol_mode"]
+    impulse_state = cur["impulse_state"]
+
+    # Basic "interesting" shape: some directional bias with enough score.
+    interesting_shape = shape_bias in {"bull", "bear"} and shape_score >= MIN_SHAPE_SCORE
+
+    # Range extremes can be interesting even with weaker shapes.
+    at_extreme = range_enum in {RangePosition.EXTREME_LOW, RangePosition.EXTREME_HIGH}
+
+    # Big impulse moves are interesting.
+    impulsive = impulse_state in {"ripping_up", "ripping_down"}
+
+    if not (interesting_shape or at_extreme or impulsive):
         return False
 
-    vol = features["volatility_mode"]
-    if vol == "unknown":
-        return False  # we don't know enough
+    # If we have a previous snapshot, prefer to trigger on *changes*.
+    if prev is not None:
+        prev_core = _extract_core_features(prev)
+        prev_bias = prev_core["shape_bias"]
+        prev_score = prev_core["shape_score"]
+        prev_range = prev_core["range_pos"]
 
-    shape_bias = features["shape_bias"]
-    shape_score = features["shape_score"]
+        # New bias, or score crossed the threshold, or range regime changed.
+        bias_changed = prev_bias != shape_bias
+        score_crossed = prev_score < MIN_SHAPE_SCORE <= shape_score
+        range_changed = prev_range != range_enum
 
-    if shape_bias not in ("bull", "bear"):
+        if bias_changed or score_crossed or range_changed or impulsive:
+            return True
+        # Otherwise it's just the same setup continuing; not enough to wake GPT.
         return False
-    if shape_score < STRONG_SHAPE_SCORE:
-        # For demo, 0.3 is "acceptable", <0.3 is noise.
-        return False
 
-    range_pos = features["range_position"]
-    trend = features["trend"]
+    # No previous snapshot → treat as candidate if any of the raw conditions fire.
+    return True
 
-    # Long-ish candidate: bull impulse from low/mid in up/sideways trend.
-    long_like = (
-        shape_bias == "bull"
-        and range_pos in ("extreme_low", "low", "mid")
-        and trend in ("up", "sideways", "unknown")
-    )
 
-    # Short-ish candidate: bear impulse from high/mid in down/sideways trend.
-    short_like = (
-        shape_bias == "bear"
-        and range_pos in ("extreme_high", "high", "mid")
-        and trend in ("down", "sideways", "unknown")
-    )
-
-    return long_like or short_like
-
+# ---------------------------------------------------------------------------
+# Main API
+# ---------------------------------------------------------------------------
 
 def should_call_gpt(
     snapshot: Dict[str, Any],
     prev_snapshot: Optional[Dict[str, Any]],
     state: Dict[str, Any],
 ) -> bool:
-    """Gatekeeper that opens based on market conditions, not a fixed timer.
-
-    Rules:
-
-    1) Snapshot timestamp must advance.
-    2) Do not exceed MAX_GPT_CALLS_PER_HOUR.
-    3) Require a "potential setup" (location + impulse + volatility).
-    4) Avoid calling again if price hasn't moved enough since last GPT call.
     """
-    cur_features = _extract_core_features(snapshot)
-    cur_ts = cur_features["timestamp"]
+    Decide whether to call GPT on this tick.
 
-    prev_ts = _get_float(prev_snapshot.get("timestamp"), 0.0) if prev_snapshot else None
-    if prev_ts is not None and cur_ts <= prev_ts:
-        logger.info(
-            "Gatekeeper: snapshot timestamp not advanced (prev=%s, cur=%s); skipping GPT.",
-            prev_ts,
-            cur_ts,
-        )
+    Uses:
+      - Hard caps on calls/hour and min spacing.
+      - Price move vs last GPT snapshot.
+      - Presence of a "candidate setup" in microstructure / regime.
+      - Timing / danger flags to avoid useless or dangerous calls.
+
+    Mutates state in-place when it approves a call:
+      - Appends to state["gpt_call_timestamps"].
+      - Updates state["last_gpt_call_walltime"].
+      - Sets state["last_gpt_snapshot"] to the current snapshot dict.
+    """
+    now_ts = float(snapshot.get("timestamp") or time.time())
+
+    core = _extract_core_features(snapshot)
+    price = core["price"]
+
+    # If timing state explicitly says AVOID, don't even consider GPT.
+    if core["timing_state"] == TimingState.AVOID:
+        logger.info("Gatekeeper: timing_state=AVOID; skipping GPT.")
         return False
 
-    now_wall = time.time()
+    # Danger mode does *not* automatically wake GPT; it's a risk concept.
+    # We still require a candidate setup or sufficient price movement.
 
-    # --- Hourly cap (cost protection only, no fixed delay) -------------------
-    calls = [
-        _get_float(t)
-        for t in state.get("gpt_call_timestamps", [])
-        if now_wall - _get_float(t) < GPT_HOURLY_WINDOW_SECONDS
-    ]
-    if len(calls) >= MAX_GPT_CALLS_PER_HOUR:
+    # --- Call frequency & spacing -------------------------------------------
+    call_timestamps = _prune_old_timestamps(state.get("gpt_call_timestamps"), now_ts)
+    state["gpt_call_timestamps"] = call_timestamps
+
+    if len(call_timestamps) >= MAX_GPT_CALLS_PER_HOUR:
         logger.info(
-            "Gatekeeper: hourly GPT call cap hit (%s >= %s); skipping GPT.",
-            len(calls),
+            "Gatekeeper: max GPT calls/hour reached (%d); skipping GPT.",
             MAX_GPT_CALLS_PER_HOUR,
         )
-        state["gpt_call_timestamps"] = calls
         return False
 
-    # --- First-ever call: only if this looks like a setup --------------------
-    last_gpt_snapshot = state.get("last_gpt_snapshot")
-    if last_gpt_snapshot is None:
-        if _is_potential_setup(cur_features):
-            logger.info("Gatekeeper: first candidate setup detected; calling GPT.")
-            state["last_gpt_snapshot"] = cur_features
-            _update_call_timestamps(state, now_wall)
-            return True
-        logger.info("Gatekeeper: first snapshot but no setup yet; skipping GPT.")
-        return False
-
-    # --- From here on, decide based on setups + change vs last GPT snapshot ---
-
-    if not _is_potential_setup(cur_features):
-        logger.info("Gatekeeper: no candidate setup in current snapshot; skipping GPT.")
-        return False
-
-    # Compare to the last snapshot we *actually* called GPT on.
-    prev_features = last_gpt_snapshot
-    price = cur_features["price"]
-    prev_price = _get_float(prev_features.get("price"), 0.0)
-
-    price_move_pct = 1.0
-    if prev_price > 0:
-        price_move_pct = abs(price - prev_price) / prev_price
-
-    same_direction = cur_features["shape_bias"] == prev_features.get("shape_bias")
-    same_range_bucket = cur_features["range_position"] == prev_features.get("range_position")
-
-    if price_move_pct < MIN_PRICE_MOVE_PCT_FROM_LAST_CALL and same_direction and same_range_bucket:
+    last_call_ts = float(state.get("last_gpt_call_walltime") or 0.0)
+    if last_call_ts and (now_ts - last_call_ts) < MIN_SECONDS_BETWEEN_CALLS:
         logger.info(
-            "Gatekeeper: setup looks similar to last GPT call; "
-            "price_move_pct=%.4f < %.4f; skipping.",
-            price_move_pct,
-            MIN_PRICE_MOVE_PCT_FROM_LAST_CALL,
+            "Gatekeeper: last GPT call %.1fs ago (< %ds); skipping GPT.",
+            now_ts - last_call_ts,
+            MIN_SECONDS_BETWEEN_CALLS,
         )
         return False
 
-    logger.info(
-        "Gatekeeper: candidate setup detected; calling GPT "
-        "(price_move_pct=%.4f, shape_bias=%s, range_position=%s, vol=%s, trend=%s).",
-        price_move_pct,
-        cur_features["shape_bias"],
-        cur_features["range_position"],
-        cur_features["volatility_mode"],
-        cur_features["trend"],
-    )
+    # --- Price move vs last GPT snapshot ------------------------------------
+    last_gpt_snapshot = state.get("last_gpt_snapshot") or {}
+    ref_price = _get_float(last_gpt_snapshot, "price", 0.0)
 
-    state["last_gpt_snapshot"] = cur_features
-    _update_call_timestamps(state, now_wall)
+    # At range extremes we relax the price-move requirement slightly.
+    range_enum = core["range_pos"]
+    move_threshold = MIN_PRICE_MOVE_PCT
+    if range_enum in {RangePosition.EXTREME_LOW, RangePosition.EXTREME_HIGH}:
+        move_threshold *= (1.0 - EXTREME_RANGE_WEIGHT)  # e.g. 0.9x threshold
+
+    move_pct = _price_move_pct(price, ref_price) if ref_price > 0.0 else 1.0
+
+    # --- Microstructure / regime setup --------------------------------------
+    candidate = _is_candidate_setup(core, prev_snapshot)
+
+    if not candidate and move_pct < move_threshold:
+        logger.info(
+            "Gatekeeper: no candidate setup and price move %.4f < %.4f; skipping GPT.",
+            move_pct,
+            move_threshold,
+        )
+        return False
+
+    # --- Approve GPT call ----------------------------------------------------
+    call_timestamps.append(now_ts)
+    state["gpt_call_timestamps"] = call_timestamps
+    state["last_gpt_call_walltime"] = now_ts
+    state["last_gpt_snapshot"] = snapshot
+
+    logger.info(
+        "Gatekeeper: candidate setup detected (candidate=%s, move_pct=%.4f, "
+        "range=%s, vol=%s, shape_bias=%s, shape_score=%.3f); calling GPT.",
+        candidate,
+        move_pct,
+        range_enum,
+        core["vol_mode"],
+        core["shape_bias"],
+        core["shape_score"],
+    )
     return True

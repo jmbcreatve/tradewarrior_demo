@@ -32,6 +32,7 @@ class MarketSnapshot:
     timing_state: str = field(default_factory=lambda: enum_to_str(TimingState.UNKNOWN))
     recent_price_path: Dict[str, Any] = field(default_factory=dict)
     risk_context: Dict[str, Any] = field(default_factory=dict)
+    risk_envelope: Dict[str, Any] = field(default_factory=dict)
     gpt_state_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -50,6 +51,7 @@ class MarketSnapshot:
             "timing_state": str(self.timing_state),
             "recent_price_path": dict(self.recent_price_path or {}),
             "risk_context": dict(self.risk_context or {}),
+            "risk_envelope": dict(self.risk_envelope or {}),
             "gpt_state_note": self.gpt_state_note,
         }
 
@@ -173,6 +175,36 @@ def validate_snapshot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         risk_ctx["last_confidence"] = 0.0
     out["risk_context"] = risk_ctx
+
+    # Risk envelope with safe defaults and light coercion
+    risk_env_raw = _safe_get(d, "risk_envelope", None)
+    risk_env_provided = "risk_envelope" in d
+    risk_env_dict = risk_env_raw if isinstance(risk_env_raw, dict) else {}
+
+    def _coerce_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    risk_env: Dict[str, Any] = {}
+    for key in (
+        "max_notional",
+        "max_leverage",
+        "max_risk_per_trade_pct",
+        "min_stop_distance_pct",
+        "max_stop_distance_pct",
+        "max_daily_loss_pct",
+    ):
+        risk_env[key] = _coerce_float(risk_env_dict.get(key, 0.0), 0.0)
+
+    default_note = "risk_envelope not provided"
+    if not risk_env_provided:
+        note_value = default_note
+    else:
+        note_value = risk_env_dict.get("note", default_note)
+    risk_env["note"] = str(note_value if note_value is not None else default_note)
+    out["risk_envelope"] = risk_env
 
     note = _safe_get(d, "gpt_state_note", None)
     out["gpt_state_note"] = None if note is None else str(note)

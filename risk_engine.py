@@ -1,12 +1,25 @@
-from typing import Dict, Any
+from __future__ import annotations
+
+from typing import Any, Dict
 
 from config import Config
-from schemas import GptDecision, RiskDecision
-from enums import Side
+from enums import (
+    Side,
+    VolatilityMode,
+    RangePosition,
+    TimingState,
+    coerce_enum,
+)
 from logger_utils import get_logger
+from risk_envelope import compute_risk_envelope, RiskEnvelope
+from schemas import GptDecision, RiskDecision
 
 logger = get_logger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
@@ -19,33 +32,126 @@ def _get_float(d: Dict[str, Any], key: str, default: float = 0.0) -> float:
         return default
 
 
+def _norm_gpt_decision(gpt_decision: Any) -> Dict[str, Any]:
+    """
+    Accept either a GptDecision instance or a raw dict and normalise it into:
+
+        {"action": "long|short|flat", "confidence": float[0,1], "notes": str}
+    """
+    if isinstance(gpt_decision, GptDecision):
+        data = gpt_decision.to_dict()
+    elif isinstance(gpt_decision, dict):
+        data = {
+            "action": str(gpt_decision.get("action", "flat")).lower(),
+            "confidence": _get_float(gpt_decision, "confidence", 0.0),
+            "notes": str(gpt_decision.get("notes", "") or ""),
+        }
+    else:
+        data = {"action": "flat", "confidence": 0.0, "notes": ""}
+
+    action = str(data.get("action", "flat")).lower()
+    if action not in {"long", "short", "flat"}:
+        action = "flat"
+
+    conf = _get_float(data, "confidence", 0.0)
+    conf = _clamp(conf, 0.0, 1.0)
+
+    notes = str(data.get("notes", "") or "")
+
+    return {"action": action, "confidence": conf, "notes": notes}
+
+
+def _vol_stop_pct(vol_enum: VolatilityMode) -> float:
+    """
+    Map vol regime to a reasonable stop distance as a fraction of price.
+
+    Higher vol → wider stops. Very conservative on purpose.
+    """
+    if vol_enum == VolatilityMode.LOW:
+        return 0.003  # 0.3%
+    if vol_enum == VolatilityMode.NORMAL:
+        return 0.005  # 0.5%
+    if vol_enum == VolatilityMode.HIGH:
+        return 0.008  # 0.8%
+    if vol_enum == VolatilityMode.EXPLOSIVE:
+        return 0.012  # 1.2%
+    return 0.006  # fallback
+
+
+# ---------------------------------------------------------------------------
+# Core risk engine
+# ---------------------------------------------------------------------------
+
 def evaluate_risk(
     snapshot: Dict[str, Any],
     gpt_decision: GptDecision,
     state: Dict[str, Any],
     config: Config,
 ) -> RiskDecision:
-    """Risk engine: treat GPT as a proposal, enforce hard risk rules.
+    """
+    Risk engine: treat GPT as a proposal, enforce hard risk rules.
 
-    Key ideas:
-    - FLAT is always allowed and costs nothing.
-    - GPT's action is a suggestion; we can veto or down-size it.
-    - Risk is sized off equity * risk_per_trade, modulated by confidence & regime.
-    - Volatility and danger/timing can only REDUCE risk, never increase it.
+    Invariants:
+    - If GPT says FLAT, we are FLAT (no trade).
+    - If price/equity are invalid, no trade.
+    - danger_mode or TimingState.AVOID → no trade.
+    - Regime/timing can only REDUCE risk, never increase it.
     """
 
-    # --- Normalize GPT decision ------------------------------------------------
-    raw_action = (gpt_decision.action or "flat").strip().lower()
-    if raw_action not in ("long", "short", "flat"):
-        raw_action = "flat"
+    # --- Normalise GPT decision ----------------------------------------------
+    gpt = _norm_gpt_decision(gpt_decision)
+    action = gpt["action"]
+    confidence = gpt["confidence"]
+    symbol = snapshot.get("symbol")
+    timestamp = snapshot.get("timestamp")
+    price = _get_float(snapshot, "price", 0.0)
+    vol_enum = coerce_enum(
+        str(snapshot.get("volatility_mode", "unknown")),
+        VolatilityMode,
+        VolatilityMode.UNKNOWN,
+    )
+    range_enum = coerce_enum(
+        str(snapshot.get("range_position", "mid")),
+        RangePosition,
+        RangePosition.MID,
+    )
+    timing_enum = coerce_enum(
+        str(snapshot.get("timing_state", "normal")),
+        TimingState,
+        TimingState.NORMAL,
+    )
+    danger_mode = bool(snapshot.get("danger_mode", False))
+    effective_env: RiskEnvelope | None = None
 
-    confidence = float(gpt_decision.confidence or 0.0)
-    confidence = _clamp(confidence, 0.0, 1.0)
+    def _log_risk_event(decision: RiskDecision, env: RiskEnvelope | None) -> None:
+        try:
+            event = {
+                "type": "risk_decision",
+                "symbol": symbol,
+                "timestamp": timestamp,
+                "price": price,
+                "gpt_action": action,
+                "gpt_confidence": confidence,
+                "approved": decision.approved,
+                "side": decision.side,
+                "position_size": decision.position_size,
+                "leverage": decision.leverage,
+                "stop_loss_price": decision.stop_loss_price,
+                "take_profit_price": decision.take_profit_price,
+                "reason": decision.reason,
+                "env_max_notional": env.max_notional if env else None,
+                "env_max_leverage": env.max_leverage if env else None,
+                "env_max_risk_pct": env.max_risk_per_trade_pct if env else None,
+                "danger_mode": danger_mode,
+                "timing_state": timing_enum.value if isinstance(timing_enum, TimingState) else timing_enum,
+            }
+            logger.info("RiskDecision event: %s", event)
+        except Exception:
+            logger.info("RiskDecision event logging failed", exc_info=True)
 
-    # If GPT is flat, we are flat. No discussion.
-    if raw_action == "flat":
-        logger.info("Risk engine: GPT chose FLAT; no trade.")
-        return RiskDecision(
+    if action == "flat":
+        logger.info("Risk: GPT requested FLAT; no trade.")
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
@@ -54,12 +160,13 @@ def evaluate_risk(
             take_profit_price=None,
             reason="gpt_flat",
         )
+        _log_risk_event(decision, effective_env)
+        return decision
 
     # --- Basic market sanity checks -------------------------------------------
-    price = _get_float(snapshot, "price", 0.0)
     if price <= 0.0:
-        logger.info("Risk engine: invalid or zero price; no trade.")
-        return RiskDecision(
+        logger.info("Risk: invalid or zero price; no trade.")
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
@@ -68,153 +175,187 @@ def evaluate_risk(
             take_profit_price=None,
             reason="invalid_price",
         )
+        _log_risk_event(decision, effective_env)
+        return decision
 
-    trend = str(snapshot.get("trend", "unknown") or "unknown").lower()
-    vol_mode = str(snapshot.get("volatility_mode", "unknown") or "unknown").lower()
-    danger_mode = bool(snapshot.get("danger_mode", False))
-    timing_state = str(snapshot.get("timing_state", "unknown") or "unknown").lower()
-    range_position = str(snapshot.get("range_position", "unknown") or "unknown").lower()
-
-    # --- Pull equity and base risk --------------------------------------------
-    equity = float(state.get("equity", 10_000.0) or 10_000.0)
-    if equity <= 0:
-        equity = 10_000.0
-
-    base_risk_pct = float(config.risk_per_trade)
-    base_risk_pct = _clamp(base_risk_pct, 0.0001, 0.05)  # between 0.01% and 5% per trade
-
-    # --- Map confidence → risk multiplier -------------------------------------
-    if confidence < 0.4:
-        # We simply refuse low-conviction directional trades.
-        logger.info("Risk engine: confidence %.3f below 0.4; forcing FLAT.", confidence)
-        return RiskDecision(
+    # --- Equity / risk budget -------------------------------------------------
+    equity = _get_float(state, "equity", 10_000.0)
+    if equity <= 0.0:
+        logger.info("Risk: non-positive equity; no trade.")
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
             leverage=0.0,
             stop_loss_price=None,
             take_profit_price=None,
-            reason="low_confidence",
+            reason="no_equity",
         )
-    elif confidence < 0.6:
-        conf_mult = 0.5
-    elif confidence < 0.8:
-        conf_mult = 1.0
-    else:
-        conf_mult = 1.5  # high conviction, but still capped elsewhere
+        _log_risk_event(decision, effective_env)
+        return decision
 
-    # --- Regime-based adjustments (can only reduce risk) ----------------------
+    # --- Risk envelope (downward-only caps) ----------------------------------
+    risk_env_dict = snapshot.get("risk_envelope") or None
+    if isinstance(risk_env_dict, dict) and risk_env_dict:
+        def _env_float(key: str) -> float:
+            try:
+                return float(risk_env_dict.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        env_note = str(risk_env_dict.get("note") or "snapshot risk envelope")
+        try:
+            effective_env = RiskEnvelope(
+                max_notional=_env_float("max_notional"),
+                max_leverage=_env_float("max_leverage"),
+                max_risk_per_trade_pct=_env_float("max_risk_per_trade_pct"),
+                min_stop_distance_pct=_env_float("min_stop_distance_pct"),
+                max_stop_distance_pct=_env_float("max_stop_distance_pct"),
+                max_daily_loss_pct=_env_float("max_daily_loss_pct"),
+                note=env_note,
+            )
+        except Exception:
+            effective_env = compute_risk_envelope(config, equity, vol_enum, danger_mode, timing_enum)
+    else:
+        effective_env = compute_risk_envelope(config, equity, vol_enum, danger_mode, timing_enum)
+
+    cfg_risk_pct = max(config.risk_per_trade, 0.0)
+    env_risk_pct = max(0.0, effective_env.max_risk_per_trade_pct)
+    allowed_risk_pct = min(cfg_risk_pct, env_risk_pct)
+
+    cfg_max_lev = max(float(getattr(config, "max_leverage", 0.0)), 0.0)
+    env_max_lev = max(0.0, effective_env.max_leverage)
+    allowed_max_lev = min(cfg_max_lev, env_max_lev)
+
+    env_max_notional = float(getattr(effective_env, "max_notional", 0.0) or 0.0)
+
+    if allowed_risk_pct <= 0.0 or allowed_max_lev <= 0.0 or env_max_notional <= 0.0:
+        logger.info(
+            "Risk: risk envelope forbids new exposure (risk_pct=%.4f, lev=%.2f, max_notional=%.2f).",
+            allowed_risk_pct,
+            allowed_max_lev,
+            env_max_notional,
+        )
+        decision = RiskDecision(
+            approved=False,
+            side=Side.FLAT.value,
+            position_size=0.0,
+            leverage=0.0,
+            stop_loss_price=None,
+            take_profit_price=None,
+            reason="risk envelope forbids new exposure",
+        )
+        _log_risk_event(decision, effective_env)
+        return decision
+
+    base_risk_pct = cfg_risk_pct
+    # Start with GPT confidence scaling risk within [0, allowed_risk_pct]
+    risk_pct = _clamp(base_risk_pct * confidence, 0.0, allowed_risk_pct)
+
     regime_mult = 1.0
 
-    # Timing state
-    if timing_state == "avoid":
-        logger.info("Risk engine: timing_state=avoid; no new trades.")
-        return RiskDecision(
-            approved=False,
-            side=Side.FLAT.value,
-            position_size=0.0,
-            leverage=0.0,
-            stop_loss_price=None,
-            take_profit_price=None,
-            reason="timing_avoid",
-        )
-    elif timing_state == "cautious":
-        regime_mult *= 0.5
-    elif timing_state == "aggressive":
-        regime_mult *= 1.2  # small boost in good windows
-
-    # Danger mode
-    if danger_mode:
-        # In dangerous environments, we only allow smaller probing size, if at all.
-        regime_mult *= 0.35
-
-    # Volatility
-    if vol_mode == "low":
+    # Volatility: trim risk as vol increases
+    if vol_enum == VolatilityMode.LOW:
         regime_mult *= 0.75
-    elif vol_mode == "normal":
+    elif vol_enum == VolatilityMode.NORMAL:
         regime_mult *= 1.0
-    elif vol_mode == "high":
-        regime_mult *= 0.85
-    elif vol_mode == "explosive":
+    elif vol_enum == VolatilityMode.HIGH:
+        regime_mult *= 0.7
+    elif vol_enum == VolatilityMode.EXPLOSIVE:
         regime_mult *= 0.5
 
-    # Final risk percent for this trade
-    effective_risk_pct = base_risk_pct * conf_mult * regime_mult
-    effective_risk_pct = _clamp(effective_risk_pct, 0.0, base_risk_pct * 2.0)
+    # Range extremes: cut risk at extremes
+    if range_enum in {RangePosition.EXTREME_HIGH, RangePosition.EXTREME_LOW}:
+        regime_mult *= 0.5
+
+    # Timing: AVOID kills risk, CAUTIOUS trims risk
+    if timing_enum == TimingState.AVOID:
+        regime_mult = 0.0
+    elif timing_enum == TimingState.CAUTIOUS:
+        regime_mult *= 0.7
+
+    # Danger mode is a hard veto
+    if danger_mode:
+        regime_mult = 0.0
+
+    effective_risk_pct = _clamp(risk_pct * regime_mult, 0.0, allowed_risk_pct)
 
     if effective_risk_pct <= 0.0:
-        logger.info("Risk engine: effective_risk_pct <= 0; no trade.")
-        return RiskDecision(
+        logger.info(
+            "Risk: effective risk zero (risk_pct=%.4f, regime_mult=%.3f, vol=%s, "
+            "range=%s, timing=%s, danger=%s); no trade.",
+            risk_pct,
+            regime_mult,
+            vol_enum,
+            range_enum,
+            timing_enum,
+            danger_mode,
+        )
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
             leverage=0.0,
             stop_loss_price=None,
             take_profit_price=None,
-            reason="zero_effective_risk",
+            reason="risk_zero",
         )
+        _log_risk_event(decision, effective_env)
+        return decision
 
-    # --- Choose a stop distance based on volatility ---------------------------
-    if vol_mode == "low":
-        stop_pct = 0.0075  # 0.75%
-    elif vol_mode == "normal":
-        stop_pct = 0.01    # 1%
-    elif vol_mode == "high":
-        stop_pct = 0.0125  # 1.25%
-    elif vol_mode == "explosive":
-        stop_pct = 0.015   # 1.5%
-    else:
-        stop_pct = 0.01
+    # --- Position sizing ------------------------------------------------------
+    stop_pct = _vol_stop_pct(vol_enum)
+    stop_pct = max(stop_pct, 0.001)  # floor at 0.1%
 
-    stop_distance = price * stop_pct
-    if stop_distance <= 0:
-        stop_distance = price * 0.01
+    dollar_risk = equity * effective_risk_pct
 
-    # --- Compute size from equity + risk -------------------------------------
-    risk_notional = equity * effective_risk_pct
-    qty = risk_notional / stop_distance if stop_distance > 0 else 0.0
-    notional = qty * price
-
-    # --- Decide leverage cap --------------------------------------------------
-    # Default leverage cap
-    leverage_cap = float(config.max_leverage)
-
-    # Allow rare "10x mode" only in aligned, high-confidence conditions.
-    aligned_trend = (
-        (raw_action == "long" and trend in ("up", "sideways"))
-        or (raw_action == "short" and trend in ("down", "sideways"))
+    # Leverage: 1x → max_leverage based on confidence,
+    # with a hard cap from max_leverage_10x_mode, and trimmed by the envelope.
+    max_lev_cfg = max(float(getattr(config, "max_leverage", 1.0)), 0.0)
+    max_lev_hard = max(
+        float(getattr(config, "max_leverage_10x_mode", max_lev_cfg)),
+        max_lev_cfg,
     )
 
-    at_extreme_range = range_position in ("extreme_low", "extreme_high")
+    leverage = 1.0 + (max_lev_cfg - 1.0) * confidence
+    leverage = _clamp(leverage, 0.0, min(max_lev_hard, allowed_max_lev))
 
-    if (
-        confidence >= 0.85
-        and not danger_mode
-        and vol_mode in ("normal", "high")
-        and timing_state in ("normal", "aggressive")
-        and aligned_trend
-        and at_extreme_range
-    ):
-        leverage_cap = float(getattr(config, "max_leverage_10x_mode", config.max_leverage))
-
-    # Compute implied leverage and clamp.
-    raw_leverage = notional / max(equity, 1e-8)
-    leverage = _clamp(raw_leverage, 0.0, leverage_cap)
-
-    if qty <= 0 or leverage <= 0:
-        logger.info("Risk engine: qty/leverage <= 0; no trade.")
-        return RiskDecision(
+    # Units: units = $risk * leverage / (price * stop_pct)
+    qty = (dollar_risk * leverage) / (price * stop_pct)
+    if qty <= 0.0:
+        logger.info("Risk: computed position size <= 0; no trade.")
+        decision = RiskDecision(
             approved=False,
             side=Side.FLAT.value,
             position_size=0.0,
             leverage=0.0,
             stop_loss_price=None,
             take_profit_price=None,
-            reason="zero_size_or_leverage",
+            reason="qty_zero",
+        )
+        _log_risk_event(decision, effective_env)
+        return decision
+
+    # Global notional cap: never risk more than X% equity notionally.
+    max_notional_pct = 0.05
+    notional = price * qty
+    cfg_notional_cap = equity * max_notional_pct * leverage
+    overall_notional_cap = min(cfg_notional_cap, env_max_notional)
+    if notional > overall_notional_cap:
+        scale = overall_notional_cap / notional
+        qty *= scale
+        logger.info(
+            "Risk: scaled down qty due to notional cap (scale=%.3f, notional=%.2f, cfg_cap=%.2f, env_cap=%.2f).",
+            scale,
+            notional,
+            cfg_notional_cap,
+            env_max_notional,
         )
 
-    # --- Build stop-loss / take-profit levels --------------------------------
-    if raw_action == "long":
+    # --- Stops / targets ------------------------------------------------------
+    stop_distance = price * stop_pct
+
+    if action == "long":
         stop_loss = price - stop_distance
         take_profit = price + 2.0 * stop_distance
         side_str = Side.LONG.value
@@ -224,25 +365,28 @@ def evaluate_risk(
         side_str = Side.SHORT.value
 
     logger.info(
-        "Risk engine: approving trade side=%s, qty=%.6f, lev=%.2f, risk_pct=%.4f "
-        "(conf=%.3f, regime_mult=%.3f, vol=%s, danger=%s, timing=%s).",
+        "Risk: approving trade side=%s, qty=%.6f, lev=%.2f, risk_pct=%.4f "
+        "(conf=%.3f, regime_mult=%.3f, vol=%s, range=%s, danger=%s, timing=%s).",
         side_str,
         qty,
         leverage,
         effective_risk_pct,
         confidence,
         regime_mult,
-        vol_mode,
+        vol_enum,
+        range_enum,
         danger_mode,
-        timing_state,
+        timing_enum,
     )
 
-    return RiskDecision(
+    decision = RiskDecision(
         approved=True,
         side=side_str,
         position_size=qty,
         leverage=leverage,
         stop_loss_price=stop_loss,
         take_profit_price=take_profit,
-        reason="risk_rules_v1",
+        reason="risk_rules_v2",
     )
+    _log_risk_event(decision, effective_env)
+    return decision
