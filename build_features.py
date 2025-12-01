@@ -9,9 +9,11 @@ from enums import (
     VolatilityMode,
     SkewBias,
     TimingState,
+    coerce_enum,
     enum_to_str,
 )
 from schemas import MarketSnapshot, validate_snapshot_dict
+from risk_envelope import compute_risk_envelope, RiskEnvelope
 from shapes_module import detect_shapes
 from logger_utils import get_logger
 
@@ -340,6 +342,22 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
     timing_state = _compute_timing_state(ts)
 
     risk_context = _build_risk_context(state)
+    try:
+        equity = float(risk_context.get("equity", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        equity = 0.0
+
+    vol_enum = coerce_enum(vol_mode, VolatilityMode, VolatilityMode.UNKNOWN)
+    timing_enum = coerce_enum(timing_state, TimingState, TimingState.UNKNOWN)
+
+    risk_envelope: RiskEnvelope = compute_risk_envelope(
+        config=config,
+        equity=equity,
+        volatility_mode=vol_enum,
+        danger_mode=danger_mode,
+        timing_state=timing_enum,
+    )
+
     gpt_state_note = state.get("gpt_state_note")
 
     snap = MarketSnapshot(
@@ -357,10 +375,12 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
         timing_state=timing_state,
         recent_price_path=recent_path,
         risk_context=risk_context,
+        risk_envelope=risk_envelope.to_dict(),
         gpt_state_note=gpt_state_note,
     )
 
     # Important: callers expect a dict, not the dataclass, so we normalise via
     # to_dict() + validate_snapshot_dict().
     snap_dict = snap.to_dict()
+    snap_dict["risk_envelope"] = risk_envelope.to_dict()
     return validate_snapshot_dict(snap_dict)

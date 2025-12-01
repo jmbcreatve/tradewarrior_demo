@@ -11,6 +11,7 @@ from enums import (
     coerce_enum,
 )
 from logger_utils import get_logger
+from risk_envelope import compute_risk_envelope, RiskEnvelope
 from schemas import GptDecision, RiskDecision
 
 logger = get_logger(__name__)
@@ -142,10 +143,6 @@ def evaluate_risk(
             reason="no_equity",
         )
 
-    base_risk_pct = max(config.risk_per_trade, 0.0)
-    # Start with GPT confidence scaling risk within [0, base_risk_pct]
-    risk_pct = _clamp(base_risk_pct * confidence, 0.0, base_risk_pct)
-
     # --- Regime modifiers from snapshot --------------------------------------
     vol_enum = coerce_enum(
         str(snapshot.get("volatility_mode", "unknown")),
@@ -163,6 +160,64 @@ def evaluate_risk(
         TimingState.NORMAL,
     )
     danger_mode = bool(snapshot.get("danger_mode", False))
+
+    # --- Risk envelope (downward-only caps) ----------------------------------
+    risk_env_dict = snapshot.get("risk_envelope") or None
+    effective_env: RiskEnvelope
+
+    if isinstance(risk_env_dict, dict) and risk_env_dict:
+        def _env_float(key: str) -> float:
+            try:
+                return float(risk_env_dict.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        env_note = str(risk_env_dict.get("note") or "snapshot risk envelope")
+        try:
+            effective_env = RiskEnvelope(
+                max_notional=_env_float("max_notional"),
+                max_leverage=_env_float("max_leverage"),
+                max_risk_per_trade_pct=_env_float("max_risk_per_trade_pct"),
+                min_stop_distance_pct=_env_float("min_stop_distance_pct"),
+                max_stop_distance_pct=_env_float("max_stop_distance_pct"),
+                max_daily_loss_pct=_env_float("max_daily_loss_pct"),
+                note=env_note,
+            )
+        except Exception:
+            effective_env = compute_risk_envelope(config, equity, vol_enum, danger_mode, timing_enum)
+    else:
+        effective_env = compute_risk_envelope(config, equity, vol_enum, danger_mode, timing_enum)
+
+    cfg_risk_pct = max(config.risk_per_trade, 0.0)
+    env_risk_pct = max(0.0, effective_env.max_risk_per_trade_pct)
+    allowed_risk_pct = min(cfg_risk_pct, env_risk_pct)
+
+    cfg_max_lev = max(float(getattr(config, "max_leverage", 0.0)), 0.0)
+    env_max_lev = max(0.0, effective_env.max_leverage)
+    allowed_max_lev = min(cfg_max_lev, env_max_lev)
+
+    env_max_notional = float(getattr(effective_env, "max_notional", 0.0) or 0.0)
+
+    if allowed_risk_pct <= 0.0 or allowed_max_lev <= 0.0 or env_max_notional <= 0.0:
+        logger.info(
+            "Risk: risk envelope forbids new exposure (risk_pct=%.4f, lev=%.2f, max_notional=%.2f).",
+            allowed_risk_pct,
+            allowed_max_lev,
+            env_max_notional,
+        )
+        return RiskDecision(
+            approved=False,
+            side=Side.FLAT.value,
+            position_size=0.0,
+            leverage=0.0,
+            stop_loss_price=None,
+            take_profit_price=None,
+            reason="risk envelope forbids new exposure",
+        )
+
+    base_risk_pct = cfg_risk_pct
+    # Start with GPT confidence scaling risk within [0, allowed_risk_pct]
+    risk_pct = _clamp(base_risk_pct * confidence, 0.0, allowed_risk_pct)
 
     regime_mult = 1.0
 
@@ -190,7 +245,7 @@ def evaluate_risk(
     if danger_mode:
         regime_mult = 0.0
 
-    effective_risk_pct = _clamp(risk_pct * regime_mult, 0.0, base_risk_pct)
+    effective_risk_pct = _clamp(risk_pct * regime_mult, 0.0, allowed_risk_pct)
 
     if effective_risk_pct <= 0.0:
         logger.info(
@@ -220,15 +275,15 @@ def evaluate_risk(
     dollar_risk = equity * effective_risk_pct
 
     # Leverage: 1x → max_leverage based on confidence,
-    # with a hard cap from max_leverage_10x_mode.
-    max_lev_cfg = max(float(getattr(config, "max_leverage", 1.0)), 1.0)
+    # with a hard cap from max_leverage_10x_mode, and trimmed by the envelope.
+    max_lev_cfg = max(float(getattr(config, "max_leverage", 1.0)), 0.0)
     max_lev_hard = max(
         float(getattr(config, "max_leverage_10x_mode", max_lev_cfg)),
         max_lev_cfg,
     )
 
     leverage = 1.0 + (max_lev_cfg - 1.0) * confidence
-    leverage = _clamp(leverage, 1.0, max_lev_hard)
+    leverage = _clamp(leverage, 0.0, min(max_lev_hard, allowed_max_lev))
 
     # Units: units = $risk * leverage / (price * stop_pct)
     qty = (dollar_risk * leverage) / (price * stop_pct)
@@ -247,15 +302,17 @@ def evaluate_risk(
     # Global notional cap: never risk more than X% equity notionally.
     max_notional_pct = 0.05
     notional = price * qty
-    max_notional = equity * max_notional_pct * leverage
-    if notional > max_notional:
-        scale = max_notional / notional
+    cfg_notional_cap = equity * max_notional_pct * leverage
+    overall_notional_cap = min(cfg_notional_cap, env_max_notional)
+    if notional > overall_notional_cap:
+        scale = overall_notional_cap / notional
         qty *= scale
         logger.info(
-            "Risk: scaled down qty due to notional cap (scale=%.3f, notional=%.2f, cap=%.2f).",
+            "Risk: scaled down qty due to notional cap (scale=%.3f, notional=%.2f, cfg_cap=%.2f, env_cap=%.2f).",
             scale,
             notional,
-            max_notional,
+            cfg_notional_cap,
+            env_max_notional,
         )
 
     # --- Stops / targets ------------------------------------------------------
