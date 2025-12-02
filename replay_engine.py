@@ -256,9 +256,60 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     trades: List[Dict[str, Any]] = []
     open_position: Optional[Dict[str, Any]] = None
     prev_snapshot: Optional[Dict[str, Any]] = None
+    parity_trace: List[Dict[str, Any]] = []
+
+    def _record_parity_entry(
+        snapshot: Dict[str, Any],
+        gpt_decision: Any,
+        risk_decision: Any,
+        execution_result: Dict[str, Any],
+        ts_value: float,
+    ) -> None:
+        gpt_side = None
+        gpt_conf = None
+        if gpt_decision is not None:
+            try:
+                gpt_side = getattr(gpt_decision, "action", None) or getattr(gpt_decision, "side", None)
+                gpt_conf = getattr(gpt_decision, "confidence", None)
+            except Exception:
+                try:
+                    gpt_side = gpt_decision.get("action") or gpt_decision.get("side")
+                    gpt_conf = gpt_decision.get("confidence")
+                except Exception:
+                    gpt_side = None
+                    gpt_conf = None
+
+        exec_status = execution_result.get("status", "skipped") if execution_result else "skipped"
+        fill_price = None
+        if execution_result:
+            fill_price = execution_result.get("fill_price") or execution_result.get("avg_fill_price")
+            if fill_price is None:
+                position_summary = execution_result.get("position") or execution_result.get("position_summary")
+                if isinstance(position_summary, dict):
+                    fill_price = position_summary.get("entry_price")
+
+        parity_trace.append(
+            {
+                "timestamp": snapshot.get("timestamp", ts_value),
+                "price": snapshot.get("price"),
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "gpt_side": gpt_side,
+                "gpt_confidence": gpt_conf,
+                "approved": getattr(risk_decision, "approved", False) if risk_decision is not None else False,
+                "side": getattr(risk_decision, "side", "flat") if risk_decision is not None else "flat",
+                "position_size": getattr(risk_decision, "position_size", 0.0) if risk_decision is not None else 0.0,
+                "leverage": getattr(risk_decision, "leverage", 0.0) if risk_decision is not None else 0.0,
+                "execution_status": exec_status,
+                "fill_price": fill_price,
+                "realized_pnl": execution_result.get("realized_pnl") if execution_result else None,
+            }
+        )
 
     for idx, candle in enumerate(candles):
         ts = _safe_float(candle.get("timestamp", idx), float(idx))
+        gpt_decision: Any = None
+        risk_decision: Any = None
+        execution_result: Dict[str, Any] = {"status": "skipped"}
 
         # If we were in a trade, close it on this bar (1-bar hold with stop/TP checks).
         if open_position:
@@ -293,6 +344,13 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         snapshot = build_snapshot(config, market_data, state)
 
         if not should_call_gpt(snapshot, prev_snapshot, state):
+            _record_parity_entry(
+                snapshot,
+                gpt_decision,
+                risk_decision,
+                execution_result,
+                ts_value=ts,
+            )
             prev_snapshot = snapshot
             equity_curve.append(equity)
             continue
@@ -339,6 +397,13 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
 
         prev_snapshot = snapshot
         state["prev_snapshot"] = snapshot
+        _record_parity_entry(
+            snapshot,
+            gpt_decision,
+            risk_decision,
+            execution_result,
+            ts_value=ts,
+        )
         equity_curve.append(equity)
 
     # If we ended with an open trade, force-close it at the last seen price.
@@ -376,7 +441,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         "max_drawdown": max_drawdown,
     }
 
-    return {"equity_curve": equity_curve, "trades": trades, "stats": stats}
+    return {"equity_curve": equity_curve, "trades": trades, "stats": stats, "parity_trace": parity_trace}
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +468,12 @@ def _parse_args() -> argparse.Namespace:
         default="analytics",
         help="Directory to write replay exports (trades/equity).",
     )
+    parser.add_argument(
+        "--parity-out",
+        type=str,
+        default=None,
+        help="Optional path to write replay parity trace as JSONL.",
+    )
     return parser.parse_args()
 
 
@@ -416,6 +487,16 @@ if __name__ == "__main__":
         candles = generate_mock_candles(cfg.symbol, cfg.timeframe, limit=args.limit, start_price=args.start_price)
 
     result = run_replay(cfg, candles, use_gpt_stub=args.stub)
+    if args.parity_out:
+        parity_path = Path(args.parity_out)
+        parity_path.parent.mkdir(parents=True, exist_ok=True)
+        with parity_path.open("w", encoding="utf-8") as f:
+            for entry in result.get("parity_trace", []):
+                f.write(json.dumps(entry) + "\n")
+        print(
+            f"Wrote parity trace with {len(result.get('parity_trace', []))} entries "
+            f"to {args.parity_out}"
+        )
     _print_summary(result["stats"])
     _write_replay_exports(result, cfg, args.out_dir)
     print(f"Replay exports written to {args.out_dir}")

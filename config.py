@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 from typing import List
 
@@ -42,10 +43,17 @@ class Config:
     log_dir: str = "logs"
 
 
-def load_config() -> Config:
-    """Return a Config instance with demo-safe defaults.
+def load_config(path: str | None = None) -> Config:
+    """Return a Config instance with demo-safe defaults or load from a file.
 
     This function MUST NOT require environment variables. All defaults are safe
     to run in a local or demo environment with no API keys.
     """
-    return Config()
+    if path is None:
+        return Config()
+
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("Config file must contain a JSON object at the top level.")
+    return Config(**payload)

@@ -76,10 +76,36 @@ def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
     - If OPENAI_API_KEY is missing, return a flat, zero-confidence decision.
     - On any error, return a flat 'error fallback' decision.
     """
+    def _log_decision_event(decision: GptDecision) -> None:
+        try:
+            try:
+                symbol = snapshot.get("symbol") if isinstance(snapshot, dict) else None
+                timestamp = snapshot.get("timestamp") if isinstance(snapshot, dict) else None
+                snapshot_id = snapshot.get("snapshot_id") if isinstance(snapshot, dict) else None
+            except Exception:
+                symbol = None
+                timestamp = None
+                snapshot_id = None
+
+            event = {
+                "type": "gpt_decision",
+                "symbol": symbol,
+                "timestamp": timestamp,
+                "snapshot_id": snapshot_id,
+                "side": getattr(decision, "action", None),
+                "confidence": getattr(decision, "confidence", None),
+                "reason": getattr(decision, "notes", None),
+            }
+            logger.info("GPT decision: %s", event)
+        except Exception:
+            logger.exception("Failed to log GPT decision event", exc_info=True)
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         logger.warning("OPENAI_API_KEY missing; returning demo flat decision.")
-        return GptDecision(action="flat", confidence=0.0, notes="demo: no GPT key")
+        decision = GptDecision(action="flat", confidence=0.0, notes="demo: no GPT key")
+        _log_decision_event(decision)
+        return decision
 
     # Allow overriding the model via env var without changing code.
     model_name = os.getenv("TRADEWARRIOR_GPT_MODEL", config.gpt_model)
@@ -114,7 +140,11 @@ def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
         confidence = max(0.0, min(1.0, confidence))
 
         logger.info("GPT model=%s action=%s confidence=%.3f", model_name, action, confidence)
-        return GptDecision(action=action, confidence=confidence, notes=notes)
+        decision = GptDecision(action=action, confidence=confidence, notes=notes)
+        _log_decision_event(decision)
+        return decision
     except Exception as exc:  # noqa: BLE001
         logger.warning("GPT call failed, using fallback: %s", exc)
-        return GptDecision(action="flat", confidence=0.0, notes="error fallback")
+        decision = GptDecision(action="flat", confidence=0.0, notes="error fallback")
+        _log_decision_event(decision)
+        return decision
