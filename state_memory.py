@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from typing import Any, Dict, List
 
 from config import Config
@@ -12,6 +13,8 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
+
+STATE_VERSION = 1
 
 DEFAULT_STATE: Dict[str, Any] = {
     # Core account metrics
@@ -37,6 +40,9 @@ DEFAULT_STATE: Dict[str, Any] = {
     # Symbol / meta
     "symbol": None,
     "gpt_state_note": None,
+    "run_id": None,
+    "snapshot_id": 0,
+    "state_version": STATE_VERSION,
 }
 
 
@@ -74,18 +80,34 @@ def _load_from_disk(path: str) -> Dict[str, Any]:
         return {}
 
 
-def _normalise_state(raw: Dict[str, Any], config: Config) -> Dict[str, Any]:
+def _normalise_state(raw: Dict[str, Any], config: Config | None = None) -> Dict[str, Any]:
     """Merge raw on-disk state with defaults and coerce types."""
     state: Dict[str, Any] = dict(DEFAULT_STATE)
 
     # Merge first, then coerce/repair.
     state.update(raw or {})
+    state["state_version"] = STATE_VERSION
 
     # Symbol: always ensure we have one.
-    if not state.get("symbol"):
+    if not state.get("symbol") and config is not None:
         state["symbol"] = config.symbol
-    else:
+    elif state.get("symbol"):
         state["symbol"] = str(state["symbol"])
+
+    # Run metadata
+    run_id_value = state.get("run_id")
+    if run_id_value is None or isinstance(run_id_value, str):
+        state["run_id"] = run_id_value
+    else:
+        state["run_id"] = None
+
+    try:
+        snapshot_id_val = int(state.get("snapshot_id", DEFAULT_STATE["snapshot_id"]) or 0)
+    except (TypeError, ValueError):
+        snapshot_id_val = 0
+    if snapshot_id_val < 0:
+        snapshot_id_val = 0
+    state["snapshot_id"] = snapshot_id_val
 
     # Equity / drawdown
     state["equity"] = _coerce_float(
@@ -157,9 +179,46 @@ def _fresh_state(config: Config) -> Dict[str, Any]:
     """Construct a brand new in-memory state based on defaults + config."""
     state = dict(DEFAULT_STATE)
     state["symbol"] = config.symbol
+    state["state_version"] = STATE_VERSION
     # Make sure list fields are fresh lists, not shared references
     state["open_positions_summary"] = []
     state["gpt_call_timestamps"] = []
+    return state
+
+
+def reset_state(config: Config | None = None) -> Dict[str, Any]:
+    """
+    Return a fresh in-memory state based on DEFAULT_STATE.
+    If a Config is provided, use it to fill any config-dependent defaults
+    (e.g. symbol) but do not read or write the state file.
+    """
+    state = deepcopy(DEFAULT_STATE)
+    if config is not None:
+        state["symbol"] = config.symbol
+    state = _normalise_state(state, config)
+    state["run_id"] = None
+    state["snapshot_id"] = 0
+    state["state_version"] = STATE_VERSION
+    return state
+
+
+def _migrate_state_if_needed(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure state['state_version'] exists and matches STATE_VERSION.
+    For now, perform minimal, safe migrations and log what happened.
+    """
+    version = state.get("state_version")
+    if version is None:
+        logger.info("State: upgrading legacy state; adding state_version=%s.", STATE_VERSION)
+        state["state_version"] = STATE_VERSION
+        return state
+    if version != STATE_VERSION:
+        logger.warning(
+            "State: migrating state from version %s to %s.",
+            version,
+            STATE_VERSION,
+        )
+        state["state_version"] = STATE_VERSION
     return state
 
 
@@ -172,10 +231,14 @@ def load_state(config: Config) -> Dict[str, Any]:
     raw = _load_from_disk(path)
     if not raw:
         logger.info("State: no existing state on disk; starting fresh.")
-        return _fresh_state(config)
-    state = _normalise_state(raw, config)
-    logger.info("State: loaded from %s (equity=%.2f, max_dd=%.2f).",
-                path, state["equity"], state["max_drawdown"])
+        state = _fresh_state(config)
+    else:
+        state = raw
+    state = _migrate_state_if_needed(state)
+    state = _normalise_state(state, config)
+    if raw:
+        logger.info("State: loaded from %s (equity=%.2f, max_dd=%.2f).",
+                    path, state["equity"], state["max_drawdown"])
     return state
 
 

@@ -18,6 +18,9 @@ def execute_decision(
 
     In paper_trading mode, this is expected to use a mock adapter only.
     """
+    raw_gpt_decision = state.get("last_gpt_decision")
+    gpt_decision_dict = raw_gpt_decision if isinstance(raw_gpt_decision, dict) else {}
+
     def _log_execution_event(execution_result: Dict[str, Any]) -> None:
         try:
             event = {
@@ -39,10 +42,39 @@ def execute_decision(
         except Exception:
             logger.info("Execution event logging failed", exc_info=True)
 
+    def _log_execution_trace(execution_result: Dict[str, Any], execution_status: str) -> None:
+        try:
+            gpt_side = gpt_decision_dict.get("side") or gpt_decision_dict.get("action")
+            event = {
+                "type": "execution_trace",
+                "symbol": state.get("symbol"),
+                "run_id": state.get("run_id"),
+                "snapshot_id": state.get("snapshot_id"),
+                "approved": risk_decision.approved,
+                "side": risk_decision.side,
+                "position_size": risk_decision.position_size,
+                "leverage": risk_decision.leverage,
+                "stop_loss_price": risk_decision.stop_loss_price,
+                "take_profit_price": risk_decision.take_profit_price,
+                "gpt_side": gpt_side,
+                "gpt_confidence": gpt_decision_dict.get("confidence"),
+                "execution_status": execution_status,
+            }
+            if execution_status != "skipped":
+                event["fill_price"] = execution_result.get("fill_price") or execution_result.get("avg_fill_price")
+                event["avg_fill_price"] = execution_result.get("avg_fill_price")
+                event["fee_paid"] = execution_result.get("fee_paid")
+                event["realized_pnl"] = execution_result.get("realized_pnl")
+
+            logger.info("Execution trace: %s", event)
+        except Exception:
+            logger.info("Execution trace logging failed", exc_info=True)
+
     if not risk_decision.approved or risk_decision.side == "flat":
         logger.info("Execution: no trade (approved=%s, side=%s).", risk_decision.approved, risk_decision.side)
         result = {"status": "no_trade", "reason": risk_decision.reason}
         _log_execution_event(result)
+        _log_execution_trace(result, "skipped")
         return result
 
     result = execution_adapter.place_order(
@@ -56,4 +88,5 @@ def execute_decision(
 
     logger.info("Execution result: %s", result)
     _log_execution_event(result)
+    _log_execution_trace(result, result.get("status"))
     return result

@@ -359,6 +359,10 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
     )
 
     gpt_state_note = state.get("gpt_state_note")
+    run_id = state.get("run_id")
+    snapshot_id = int(state.get("snapshot_id", 0) or 0)
+    if snapshot_id <= 0:
+        snapshot_id = 0
 
     snap = MarketSnapshot(
         symbol=str(state.get("symbol", config.symbol)),
@@ -383,4 +387,7 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
     # to_dict() + validate_snapshot_dict().
     snap_dict = snap.to_dict()
     snap_dict["risk_envelope"] = risk_envelope.to_dict()
-    return validate_snapshot_dict(snap_dict)
+    snap_dict = validate_snapshot_dict(snap_dict)
+    snap_dict["run_id"] = run_id
+    snap_dict["snapshot_id"] = snapshot_id
+    return snap_dict
