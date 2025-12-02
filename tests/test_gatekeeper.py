@@ -27,7 +27,7 @@ def test_gatekeeper_skips_when_no_move_no_shape():
 
     decision = should_call_gpt(snapshot, prev_snapshot=snapshot, state=state)
 
-    assert decision is False
+    assert decision["should_call_gpt"] is False
     assert state["gpt_call_timestamps"] == []
 
 
@@ -43,5 +43,29 @@ def test_gatekeeper_triggers_on_strong_setup():
 
     decision = should_call_gpt(snapshot, prev_snapshot=None, state=state)
 
-    assert decision is True
+    assert decision["should_call_gpt"] is True
     assert state["gpt_call_timestamps"]  # timestamp appended on approval
+
+
+def test_gatekeeper_skips_when_since_last_gpt_negligible(caplog):
+    snapshot = _base_snapshot(
+        price=101.0,
+        shape_score=0.8,
+        shape_bias="bull",
+        range_pos=enum_to_str(RangePosition.MID),
+        impulse="ripping_up",
+    )
+    snapshot["since_last_gpt"] = {
+        "time_since_last_gpt_sec": 30.0,
+        "price_change_pct_since_last_gpt": 0.0001,
+        "equity_change_since_last_gpt": 0.0,
+        "trades_since_last_gpt": 0,
+    }
+    state = {"last_gpt_snapshot": {"price": 100.0}, "gpt_call_timestamps": [], "last_gpt_call_walltime": 0.0}
+
+    with caplog.at_level("INFO"):
+        decision = should_call_gpt(snapshot, prev_snapshot=None, state=state)
+
+    assert decision["should_call_gpt"] is False
+    assert state["gpt_call_timestamps"] == []
+    assert any("since_last_gpt" in rec.message or "negligible change" in rec.message for rec in caplog.records)
