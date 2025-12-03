@@ -1,0 +1,197 @@
+{
+  "equity": 1000.0,
+  "gpt_call_timestamps": [
+    1764746184.0
+  ],
+  "gpt_state_note": "error fallback",
+  "last_decision": null,
+  "last_envelope": null,
+  "last_execution_result": {
+    "leverage": 0.0,
+    "position_size": 0.0,
+    "reason": "gpt_flat",
+    "side": "flat",
+    "status": "dry_run",
+    "stop_loss_price": null,
+    "take_profit_price": null
+  },
+  "last_gpt_call_ts": null,
+  "last_gpt_call_walltime": 1764746184.0,
+  "last_gpt_decision": {
+    "action": "flat",
+    "confidence": 0.0,
+    "notes": "error fallback"
+  },
+  "last_gpt_equity": 0.0,
+  "last_gpt_snapshot": {
+    "danger_mode": false,
+    "fib_context": {
+      "macro_zone": "macro_discount",
+      "micro_zone": "micro_discount"
+    },
+    "flow": {
+      "funding": -0.007078256993147385,
+      "open_interest": 3713.9638670684203,
+      "skew": 0.7669123723772691,
+      "skew_bias": "unknown",
+      "skew_bias_hint": "call_dominant"
+    },
+    "gpt_state_note": null,
+    "liquidity_context": {
+      "liquidity_above": null,
+      "liquidity_below": null
+    },
+    "microstructure": {
+      "bos_direction": "none",
+      "choch_direction": "none",
+      "compression_active": false,
+      "displacement_down": false,
+      "displacement_up": false,
+      "eq_high_cluster": true,
+      "eq_low_cluster": true,
+      "fract_high": true,
+      "fract_low": false,
+      "fvg_down": false,
+      "fvg_up": false,
+      "order_block_bias": "bear",
+      "shape_bias": "bear",
+      "shape_score": 0.25,
+      "sweep_down": false,
+      "sweep_up": false,
+      "wick_exhaustion_down": false,
+      "wick_exhaustion_up": false
+    },
+    "price": 29763.216008093757,
+    "range_position": "mid",
+    "recent_price_path": {
+      "impulse_state": "chop",
+      "lookback_bars": 100,
+      "ret_1": -0.0029876125607421664,
+      "ret_15": -0.0031601211922943026,
+      "ret_5": -0.0018739893911279178
+    },
+    "risk_context": {
+      "equity": 1000.0,
+      "last_action": "flat",
+      "last_confidence": 0.0,
+      "max_drawdown": 0.0,
+      "open_positions_summary": []
+    },
+    "risk_envelope": {
+      "max_daily_loss_pct": 0.03,
+      "max_leverage": 2.0,
+      "max_notional": 2000.0,
+      "max_risk_per_trade_pct": 0.01,
+      "max_stop_distance_pct": 0.03,
+      "min_stop_distance_pct": 0.005,
+      "note": "baseline_vol;timing_normal"
+    },
+    "run_id": "8a08b96f9aed4c2d91a71265e5343d12",
+    "since_last_gpt": {
+      "equity_change_since_last_gpt": 1000.0,
+      "price_change_pct_since_last_gpt": 0.0,
+      "time_since_last_gpt_sec": 0.0,
+      "trades_since_last_gpt": 0
+    },
+    "snapshot_id": 1,
+    "symbol": "BTCUSDT",
+    "timestamp": 1764746184.0,
+    "timing_state": "normal",
+    "trend": "down",
+    "volatility_mode": "normal"
+  },
+  "last_risk_decision": {
+    "approved": false,
+    "leverage": 0.0,
+    "position_size": 0.0,
+    "reason": "gpt_flat",
+    "side": "flat",
+    "stop_loss_price": null,
+    "take_profit_price": null
+  },
+  "last_snapshot": null,
+  "max_drawdown": 0.0,
+  "open_positions_summary": [],
+  "prev_snapshot": {
+    "danger_mode": false,
+    "fib_context": {
+      "macro_zone": "macro_discount",
+      "micro_zone": "micro_discount"
+    },
+    "flow": {
+      "funding": -0.007078256993147385,
+      "open_interest": 3713.9638670684203,
+      "skew": 0.7669123723772691,
+      "skew_bias": "unknown",
+      "skew_bias_hint": "call_dominant"
+    },
+    "gpt_state_note": null,
+    "liquidity_context": {
+      "liquidity_above": null,
+      "liquidity_below": null
+    },
+    "microstructure": {
+      "bos_direction": "none",
+      "choch_direction": "none",
+      "compression_active": false,
+      "displacement_down": false,
+      "displacement_up": false,
+      "eq_high_cluster": true,
+      "eq_low_cluster": true,
+      "fract_high": true,
+      "fract_low": false,
+      "fvg_down": false,
+      "fvg_up": false,
+      "order_block_bias": "bear",
+      "shape_bias": "bear",
+      "shape_score": 0.25,
+      "sweep_down": false,
+      "sweep_up": false,
+      "wick_exhaustion_down": false,
+      "wick_exhaustion_up": false
+    },
+    "price": 29763.216008093757,
+    "range_position": "mid",
+    "recent_price_path": {
+      "impulse_state": "chop",
+      "lookback_bars": 100,
+      "ret_1": -0.0029876125607421664,
+      "ret_15": -0.0031601211922943026,
+      "ret_5": -0.0018739893911279178
+    },
+    "risk_context": {
+      "equity": 1000.0,
+      "last_action": "flat",
+      "last_confidence": 0.0,
+      "max_drawdown": 0.0,
+      "open_positions_summary": []
+    },
+    "risk_envelope": {
+      "max_daily_loss_pct": 0.03,
+      "max_leverage": 2.0,
+      "max_notional": 2000.0,
+      "max_risk_per_trade_pct": 0.01,
+      "max_stop_distance_pct": 0.03,
+      "min_stop_distance_pct": 0.005,
+      "note": "baseline_vol;timing_normal"
+    },
+    "run_id": "8a08b96f9aed4c2d91a71265e5343d12",
+    "since_last_gpt": {
+      "equity_change_since_last_gpt": 1000.0,
+      "price_change_pct_since_last_gpt": 0.0,
+      "time_since_last_gpt_sec": 0.0,
+      "trades_since_last_gpt": 0
+    },
+    "snapshot_id": 1,
+    "symbol": "BTCUSDT",
+    "timestamp": 1764746184.0,
+    "timing_state": "normal",
+    "trend": "down",
+    "volatility_mode": "normal"
+  },
+  "run_id": "8a08b96f9aed4c2d91a71265e5343d12",
+  "snapshot_id": 1,
+  "state_version": 1,
+  "symbol": "BTCUSDT",
+  "trades_since_last_gpt": 0
+}

@@ -1,5 +1,5 @@
 # TradeWarrior Canon
-_Last updated: 2025-12-02_
+_Last updated: 2025-12-03_
 
 ---
 
@@ -44,7 +44,7 @@ When starting a new chat, the model should be told which role it is playing and 
 
 | File / Dir                     | Purpose |
 |--------------------------------|---------|
-| `config.py`                    | Runtime configuration (symbol, risk caps, intervals, paths). |
+| `config.py`                    | Runtime configuration (symbol, risk caps, intervals, paths, testnet mode, initial equity). |
 | `engine.py`                    | Main orchestrator loop for live/demo trading. |
 | `build_features.py`            | Builds snapshot dict from raw market data + shapes. |
 | `shapes_module.py`             | Deterministic microstructure features (sweeps, FVGs, CHoCH, etc.). |
@@ -61,6 +61,7 @@ When starting a new chat, the model should be told which role it is playing and 
 | `replay_engine.py`            | Backtest harness using the same spine plus replay adapters. |
 | `state_memory.py`             | Persistent JSON state management (load/validate/save). |
 | `logger_utils.py`             | Central logging setup. |
+| `run_testnet.py`              | Testnet runner script for Hyperliquid testnet trading with safety banners and configuration. |
 | `tests/`                      | Unit and integration tests for snapshot, gatekeeper, GPT client, risk envelope/engine, execution, replay parity, etc. |
 
 ---

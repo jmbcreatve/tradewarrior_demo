@@ -22,6 +22,8 @@ def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
     
     Data adapters are always safe to use (read-only) so we include Hyperliquid
     for real market data even in SIM mode. Only execution adapters need protection.
+    
+    When is_testnet=True or execution_mode=HL_TESTNET, uses testnet API for data.
     """
     if config.execution_mode == ExecutionMode.HL_MAINNET:
         # Hard safety rail: we do not support live-mainnet yet.
@@ -34,13 +36,18 @@ def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
         "example": ExampleDataAdapter(),
     }
 
-    # Always include Hyperliquid data adapter - it's read-only and safe
+    # Determine if we should use testnet API for data
+    # Use testnet if explicitly set OR if execution mode is testnet
+    use_testnet = getattr(config, "is_testnet", False) or config.execution_mode == ExecutionMode.HL_TESTNET
+    
+    # Include Hyperliquid data adapter - it's read-only and safe
     # This allows using real market data even in SIM mode for backtesting
     try:
-        hl_adapter = HyperliquidDataAdapter(use_testnet=False)  # Use mainnet for real data
+        hl_adapter = HyperliquidDataAdapter(use_testnet=use_testnet)
         if hl_adapter.health_check():
             adapters["hl"] = hl_adapter
-            logger.info("HyperliquidDataAdapter available for real market data")
+            mode_str = "TESTNET" if use_testnet else "mainnet"
+            logger.info(f"HyperliquidDataAdapter available for {mode_str} market data")
         else:
             logger.warning("HyperliquidDataAdapter health check failed, not adding to adapters")
     except Exception as e:

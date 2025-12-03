@@ -210,6 +210,8 @@ def _fresh_state(config: Config) -> Dict[str, Any]:
     state = dict(DEFAULT_STATE)
     state["symbol"] = config.symbol
     state["state_version"] = STATE_VERSION
+    # Use config's initial_equity if available (for testnet $1000 accounts)
+    state["equity"] = getattr(config, "initial_equity", DEFAULT_STATE["equity"])
     # Make sure list fields are fresh lists, not shared references
     state["open_positions_summary"] = []
     state["gpt_call_timestamps"] = []
@@ -220,11 +222,13 @@ def reset_state(config: Config | None = None) -> Dict[str, Any]:
     """
     Return a fresh in-memory state based on DEFAULT_STATE.
     If a Config is provided, use it to fill any config-dependent defaults
-    (e.g. symbol) but do not read or write the state file.
+    (e.g. symbol, initial_equity) but do not read or write the state file.
     """
     state = deepcopy(DEFAULT_STATE)
     if config is not None:
         state["symbol"] = config.symbol
+        # Use config's initial_equity if available (for testnet $1000 accounts)
+        state["equity"] = getattr(config, "initial_equity", DEFAULT_STATE["equity"])
     state = _normalise_state(state, config)
     state["run_id"] = None
     state["snapshot_id"] = 0

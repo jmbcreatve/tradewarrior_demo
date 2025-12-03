@@ -179,7 +179,9 @@ def evaluate_risk(
         return decision
 
     # --- Equity / risk budget -------------------------------------------------
-    equity = _get_float(state, "equity", 10_000.0)
+    # Use equity from state, falling back to config's initial_equity
+    default_equity = getattr(config, "initial_equity", 10_000.0)
+    equity = _get_float(state, "equity", default_equity)
     if equity <= 0.0:
         logger.info("Risk: non-positive equity; no trade.")
         decision = RiskDecision(
