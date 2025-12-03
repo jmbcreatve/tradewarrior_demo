@@ -3,7 +3,7 @@ import re
 
 from config import Config
 from enums import Side
-from risk_engine import evaluate_risk
+from risk_engine import evaluate_risk, _check_daily_loss_limit
 from schemas import GptDecision
 
 
@@ -209,3 +209,98 @@ def test_risk_logs_envelope_note_for_volatility_tightening(caplog):
     assert state["last_risk_envelope"] is not None
     envelope_note = state["last_risk_envelope"].get("note", "")
     assert "trim_for_vol" in envelope_note or "vol" in envelope_note.lower()
+
+
+def test_check_daily_loss_limit_allows_trading_when_under_limit():
+    """Test that daily loss limit check allows trading when under limit."""
+    daily_pnl = -100.0  # -$100 loss
+    daily_start_equity = 10_000.0  # Started with $10k
+    max_daily_loss_pct = 0.03  # 3% limit = $300 max loss
+
+    exceeded = _check_daily_loss_limit(daily_pnl, daily_start_equity, max_daily_loss_pct)
+    assert exceeded is False  # -$100 is less than -$300 limit
+
+
+def test_check_daily_loss_limit_blocks_when_limit_exceeded():
+    """Test that daily loss limit check blocks trading when limit exceeded."""
+    daily_pnl = -400.0  # -$400 loss
+    daily_start_equity = 10_000.0  # Started with $10k
+    max_daily_loss_pct = 0.03  # 3% limit = $300 max loss
+
+    exceeded = _check_daily_loss_limit(daily_pnl, daily_start_equity, max_daily_loss_pct)
+    assert exceeded is True  # -$400 exceeds -$300 limit
+
+
+def test_check_daily_loss_limit_allows_when_no_tracking():
+    """Test that daily loss limit check allows trading when daily tracking not initialized."""
+    daily_pnl = -1000.0  # Large loss
+    daily_start_equity = None  # Not initialized
+    max_daily_loss_pct = 0.03
+
+    exceeded = _check_daily_loss_limit(daily_pnl, daily_start_equity, max_daily_loss_pct)
+    assert exceeded is False  # No tracking means allow trading
+
+
+def test_risk_rejects_trade_when_daily_loss_limit_exceeded():
+    """Test that risk engine rejects trades when daily loss limit is exceeded."""
+    config = Config()
+    snapshot = {
+        "price": 100.0,
+        "volatility_mode": "normal",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.01,
+            "max_leverage": 3.0,
+            "max_notional": 5000.0,
+            "min_stop_distance_pct": 0.005,
+            "max_stop_distance_pct": 0.03,
+            "max_daily_loss_pct": 0.03,  # 3% daily loss limit
+            "note": "baseline",
+        },
+    }
+    # State with daily loss limit exceeded: -$400 on $10k start = -4% (exceeds 3% limit)
+    state = {
+        "equity": 9_600,  # Current equity
+        "daily_start_equity": 10_000.0,
+        "daily_pnl": -400.0,  # -4% loss, exceeds 3% limit
+    }
+
+    decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=0.9), state, config)
+
+    assert decision.approved is False
+    assert decision.reason == "daily_loss_limit_exceeded"
+    assert decision.side == Side.FLAT.value
+
+
+def test_risk_allows_trade_when_daily_loss_under_limit():
+    """Test that risk engine allows trades when daily loss is under limit."""
+    config = Config()
+    snapshot = {
+        "price": 100.0,
+        "volatility_mode": "normal",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.01,
+            "max_leverage": 3.0,
+            "max_notional": 5000.0,
+            "min_stop_distance_pct": 0.005,
+            "max_stop_distance_pct": 0.03,
+            "max_daily_loss_pct": 0.03,  # 3% daily loss limit
+            "note": "baseline",
+        },
+    }
+    # State with daily loss under limit: -$200 on $10k start = -2% (under 3% limit)
+    state = {
+        "equity": 9_800,  # Current equity
+        "daily_start_equity": 10_000.0,
+        "daily_pnl": -200.0,  # -2% loss, under 3% limit
+    }
+
+    decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=0.9), state, config)
+
+    assert decision.approved is True
+    assert decision.side == Side.LONG.value

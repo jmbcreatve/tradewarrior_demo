@@ -27,3 +27,6 @@ hl_keys.*
 twp3_testnet.env
 
 .venv/
+
+# Kill switch file
+.tradewarrior_kill_switch

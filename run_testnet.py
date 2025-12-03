@@ -33,6 +33,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import load_testnet_config, _load_env_file
 from engine import run_once, run_forever
 from state_memory import load_state, reset_state
+from risk_envelope import compute_risk_envelope
+from enums import VolatilityMode, TimingState
+from safety_utils import KILL_SWITCH_FILE
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -63,8 +66,25 @@ TESTNET_BANNER = """
 """
 
 
-def _log_config_summary(cfg) -> None:
+def _log_config_summary(cfg, state) -> None:
     """Log key configuration values for visibility."""
+    # Compute risk envelope to get max_daily_loss_pct
+    equity = state.get("equity", cfg.initial_equity)
+    risk_env = compute_risk_envelope(
+        cfg,
+        equity,
+        VolatilityMode.NORMAL,
+        danger_mode=False,
+        timing_state=TimingState.NORMAL,
+    )
+
+    # Get daily P&L info
+    daily_pnl = state.get("daily_pnl", 0.0)
+    daily_start_equity = state.get("daily_start_equity")
+    daily_pnl_pct = None
+    if daily_start_equity is not None and daily_start_equity > 0:
+        daily_pnl_pct = (daily_pnl / daily_start_equity) * 100.0
+
     summary = {
         "mode": "TESTNET",
         "is_testnet": cfg.is_testnet,
@@ -72,11 +92,15 @@ def _log_config_summary(cfg) -> None:
         "symbol": cfg.symbol,
         "timeframe": cfg.timeframe,
         "initial_equity": f"${cfg.initial_equity:,.2f}",
+        "current_equity": f"${equity:,.2f}",
         "risk_per_trade": f"{cfg.risk_per_trade * 100:.1f}%",
         "max_leverage": f"{cfg.max_leverage}x",
+        "max_daily_loss_pct": f"{risk_env.max_daily_loss_pct * 100:.1f}%",
+        "daily_pnl": f"${daily_pnl:,.2f}" + (f" ({daily_pnl_pct:+.2f}%)" if daily_pnl_pct is not None else ""),
         "primary_data_source": cfg.primary_data_source_id,
         "primary_execution": cfg.primary_execution_id,
         "state_file": cfg.state_file,
+        "kill_switch_file": KILL_SWITCH_FILE,
     }
     
     logger.info("=" * 60)
@@ -168,9 +192,6 @@ Examples:
     if args.sleep is not None:
         cfg.loop_sleep_seconds = args.sleep
 
-    # Log configuration
-    _log_config_summary(cfg)
-
     # Load or reset state
     if args.reset:
         logger.info("🔄 Starting with fresh state (--reset flag)")
@@ -182,12 +203,35 @@ Examples:
         f"💰 Starting equity: ${state.get('equity', cfg.initial_equity):,.2f}"
     )
 
+    # Log configuration (after state is loaded)
+    _log_config_summary(cfg, state)
+
     # Testnet safety confirmations
     logger.info("")
     logger.info("🔐 SAFETY CHECKS:")
     logger.info(f"   ✓ is_testnet = {cfg.is_testnet}")
     logger.info(f"   ✓ execution_mode = {cfg.execution_mode}")
     logger.info(f"   ✓ Wallet: {os.getenv('HL_TESTNET_MAIN_WALLET_ADDRESS', 'NOT SET')[:10]}...")
+    logger.info(f"   ✓ Kill switch: {KILL_SWITCH_FILE} (create this file to halt trading)")
+    
+    # Show daily P&L status
+    daily_pnl = state.get("daily_pnl", 0.0)
+    daily_start_equity = state.get("daily_start_equity")
+    if daily_start_equity is not None:
+        daily_pnl_pct = (daily_pnl / daily_start_equity) * 100.0 if daily_start_equity > 0 else 0.0
+        risk_env = compute_risk_envelope(
+            cfg,
+            state.get("equity", cfg.initial_equity),
+            VolatilityMode.NORMAL,
+            danger_mode=False,
+            timing_state=TimingState.NORMAL,
+        )
+        max_loss_pct = risk_env.max_daily_loss_pct * 100.0
+        logger.info(f"   ✓ Daily P&L: ${daily_pnl:,.2f} ({daily_pnl_pct:+.2f}%) / Max loss: {max_loss_pct:.1f}%")
+        if state.get("trading_halted", False):
+            logger.warning("   ⚠️  TRADING HALTED (circuit breaker active)")
+    else:
+        logger.info("   ✓ Daily tracking: Not initialized (will start on first tick)")
     logger.info("")
 
     # Run the engine

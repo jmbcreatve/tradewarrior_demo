@@ -21,6 +21,12 @@ DEFAULT_STATE: Dict[str, Any] = {
     "equity": 10_000.0,
     "max_drawdown": 0.0,
 
+    # Daily P&L tracking
+    "daily_start_equity": None,     # float: equity at start of trading day
+    "daily_start_timestamp": None,  # float: UTC timestamp when day started
+    "daily_pnl": 0.0,              # float: current day's P&L (equity - daily_start_equity)
+    "trading_halted": False,        # bool: circuit breaker flag
+
     # Positions summary: adapters can store lightweight position views here.
     "open_positions_summary": [],  # type: List[Dict[str, Any]]
 
@@ -66,6 +72,19 @@ def _coerce_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _reset_daily_tracking(state: Dict[str, Any], current_equity: float, current_timestamp: float) -> None:
+    """Reset daily tracking metrics at start of new trading day."""
+    state["daily_start_equity"] = current_equity
+    state["daily_start_timestamp"] = current_timestamp
+    state["daily_pnl"] = 0.0
+    state["trading_halted"] = False
+    logger.info(
+        "Daily tracking reset: start_equity=%.2f, timestamp=%.2f",
+        current_equity,
+        current_timestamp,
+    )
 
 
 def _load_from_disk(path: str) -> Dict[str, Any]:
@@ -125,6 +144,34 @@ def _normalise_state(raw: Dict[str, Any], config: Config | None = None) -> Dict[
         state.get("max_drawdown", DEFAULT_STATE["max_drawdown"]),
         DEFAULT_STATE["max_drawdown"],
     )
+
+    # Daily P&L tracking
+    daily_start_equity = state.get("daily_start_equity")
+    if daily_start_equity is None:
+        state["daily_start_equity"] = None
+    else:
+        state["daily_start_equity"] = _coerce_float(daily_start_equity, state["equity"])
+
+    daily_start_ts = state.get("daily_start_timestamp")
+    if daily_start_ts is None:
+        state["daily_start_timestamp"] = None
+    else:
+        try:
+            state["daily_start_timestamp"] = float(daily_start_ts)
+        except (TypeError, ValueError):
+            state["daily_start_timestamp"] = None
+
+    state["daily_pnl"] = _coerce_float(
+        state.get("daily_pnl", DEFAULT_STATE["daily_pnl"]),
+        DEFAULT_STATE["daily_pnl"],
+    )
+
+    # Trading halted flag
+    trading_halted = state.get("trading_halted")
+    if trading_halted is None:
+        state["trading_halted"] = DEFAULT_STATE["trading_halted"]
+    else:
+        state["trading_halted"] = bool(trading_halted)
 
     # Open positions
     ops = state.get("open_positions_summary", DEFAULT_STATE["open_positions_summary"])
@@ -215,6 +262,11 @@ def _fresh_state(config: Config) -> Dict[str, Any]:
     # Make sure list fields are fresh lists, not shared references
     state["open_positions_summary"] = []
     state["gpt_call_timestamps"] = []
+    # Daily tracking starts fresh
+    state["daily_start_equity"] = None
+    state["daily_start_timestamp"] = None
+    state["daily_pnl"] = 0.0
+    state["trading_halted"] = False
     return state
 
 

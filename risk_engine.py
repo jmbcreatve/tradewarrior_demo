@@ -78,6 +78,35 @@ def _vol_stop_pct(vol_enum: VolatilityMode) -> float:
     return 0.006  # fallback
 
 
+def _check_daily_loss_limit(
+    daily_pnl: float,
+    daily_start_equity: float,
+    max_daily_loss_pct: float,
+) -> bool:
+    """
+    Check if daily loss limit has been exceeded.
+
+    Args:
+        daily_pnl: Current day's P&L (can be negative for losses)
+        daily_start_equity: Equity at start of trading day
+        max_daily_loss_pct: Maximum daily loss as fraction (e.g., 0.03 for 3%)
+
+    Returns:
+        True if daily loss limit is exceeded (should halt trading).
+    """
+    if daily_start_equity is None or daily_start_equity <= 0.0:
+        return False  # No daily tracking yet, allow trading
+
+    if max_daily_loss_pct <= 0.0:
+        return False  # No limit set, allow trading
+
+    # Calculate daily P&L as fraction of start equity
+    daily_pnl_fraction = daily_pnl / daily_start_equity
+    # Compare: if daily_pnl_fraction <= -max_daily_loss_pct, limit exceeded
+    # Example: -0.04 <= -0.03 is True (4% loss exceeds 3% limit)
+    return daily_pnl_fraction <= -max_daily_loss_pct
+
+
 # ---------------------------------------------------------------------------
 # Core risk engine
 # ---------------------------------------------------------------------------
@@ -239,6 +268,34 @@ def evaluate_risk(
     # Store effective envelope in state for execution logging
     if effective_env:
         state["last_risk_envelope"] = effective_env.to_dict()
+
+    # --- Daily loss limit check (circuit breaker) -----------------------------
+    daily_pnl = _get_float(state, "daily_pnl", 0.0)
+    daily_start_equity = state.get("daily_start_equity")
+    if daily_start_equity is not None:
+        daily_start_equity = _get_float(state, "daily_start_equity", 0.0)
+        max_daily_loss_pct = effective_env.max_daily_loss_pct if effective_env else 0.03
+
+        if _check_daily_loss_limit(daily_pnl, daily_start_equity, max_daily_loss_pct):
+            daily_pnl_pct = (daily_pnl / daily_start_equity) * 100.0 if daily_start_equity > 0 else 0.0
+            logger.warning(
+                "Risk: DAILY LOSS LIMIT EXCEEDED (daily_pnl=%.2f, daily_pnl_pct=%.2f%%, "
+                "max_daily_loss_pct=%.2f%%). Circuit breaker activated - no trade allowed.",
+                daily_pnl,
+                daily_pnl_pct,
+                max_daily_loss_pct * 100.0,
+            )
+            decision = RiskDecision(
+                approved=False,
+                side=Side.FLAT.value,
+                position_size=0.0,
+                leverage=0.0,
+                stop_loss_price=None,
+                take_profit_price=None,
+                reason="daily_loss_limit_exceeded",
+            )
+            _log_risk_event(decision, effective_env)
+            return decision
 
     cfg_risk_pct = max(config.risk_per_trade, 0.0)
     env_risk_pct = max(0.0, effective_env.max_risk_per_trade_pct)

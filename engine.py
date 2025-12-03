@@ -1,6 +1,7 @@
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pprint import pprint
 from typing import Any, Dict
 
@@ -13,9 +14,10 @@ from data_router import (
 from build_features import build_snapshot
 from gatekeeper import should_call_gpt
 from gpt_client import call_gpt
-from risk_engine import evaluate_risk
+from risk_engine import evaluate_risk, _check_daily_loss_limit
 from execution_engine import execute_decision
-from state_memory import load_state, save_state, reset_state
+from state_memory import load_state, save_state, reset_state, _reset_daily_tracking
+from safety_utils import check_trading_halted
 from logger_utils import get_logger
 
 RUN_ID = uuid.uuid4().hex
@@ -43,6 +45,17 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
     if not state.get("run_id"):
         state["run_id"] = RUN_ID
     state.setdefault("symbol", cfg.symbol)
+
+    # --- Safety checks: kill switch and circuit breaker -----------------------
+    is_halted, halt_reason = check_trading_halted(state)
+    if is_halted:
+        logger.warning(
+            "Engine: Trading halted (reason=%s). Skipping tick.",
+            halt_reason,
+        )
+        # Still save state and return
+        save_state(state, cfg)
+        return state
 
     data_adapters = build_data_adapters(cfg)
     exec_adapters = build_execution_adapters(cfg)
@@ -123,6 +136,53 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
     else:
         execution_result = execute_decision(risk_decision, cfg, state, exec_adapter)
 
+    # --- Update equity from execution results --------------------------------
+    realized_pnl = execution_result.get("realized_pnl")
+    if realized_pnl is not None:
+        try:
+            pnl_value = float(realized_pnl)
+            old_equity = state.get("equity", 0.0)
+            state["equity"] = old_equity + pnl_value
+
+            # Update daily P&L
+            daily_start_equity = state.get("daily_start_equity")
+            if daily_start_equity is not None:
+                state["daily_pnl"] = state["equity"] - daily_start_equity
+                logger.info(
+                    "Equity updated: %.2f -> %.2f (pnl=%.2f, daily_pnl=%.2f)",
+                    old_equity,
+                    state["equity"],
+                    pnl_value,
+                    state["daily_pnl"],
+                )
+            else:
+                logger.info(
+                    "Equity updated: %.2f -> %.2f (pnl=%.2f)",
+                    old_equity,
+                    state["equity"],
+                    pnl_value,
+                )
+        except (TypeError, ValueError):
+            logger.warning("Invalid realized_pnl in execution result: %s", realized_pnl)
+
+    # --- Check daily loss limit after execution -------------------------------
+    daily_pnl = state.get("daily_pnl", 0.0)
+    daily_start_equity = state.get("daily_start_equity")
+    if daily_start_equity is not None:
+        risk_env = state.get("last_risk_envelope")
+        if risk_env and isinstance(risk_env, dict):
+            max_daily_loss_pct = risk_env.get("max_daily_loss_pct", 0.03)
+            if _check_daily_loss_limit(daily_pnl, daily_start_equity, max_daily_loss_pct):
+                state["trading_halted"] = True
+                daily_pnl_pct = (daily_pnl / daily_start_equity) * 100.0 if daily_start_equity > 0 else 0.0
+                logger.critical(
+                    "🚨 CIRCUIT BREAKER ACTIVATED: Daily loss limit exceeded "
+                    "(daily_pnl=%.2f, daily_pnl_pct=%.2f%%, max=%.2f%%). Trading halted.",
+                    daily_pnl,
+                    daily_pnl_pct,
+                    max_daily_loss_pct * 100.0,
+                )
+
     t_exec = time.perf_counter()
 
     dt_snapshot = t_snap - t0
@@ -147,6 +207,31 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
     return state
 
 
+def _initialize_daily_tracking(state: Dict[str, Any]) -> None:
+    """Initialize or reset daily tracking if it's a new day."""
+    now = time.time()
+    daily_start_ts = state.get("daily_start_timestamp")
+
+    # Check if we need to reset (None or new day)
+    reset_needed = False
+    if daily_start_ts is None:
+        reset_needed = True
+    else:
+        # Check if it's a new UTC day
+        try:
+            start_date = datetime.fromtimestamp(daily_start_ts, tz=timezone.utc).date()
+            current_date = datetime.fromtimestamp(now, tz=timezone.utc).date()
+            if start_date != current_date:
+                reset_needed = True
+        except (ValueError, OSError):
+            # Invalid timestamp, reset
+            reset_needed = True
+
+    if reset_needed:
+        current_equity = state.get("equity", 0.0)
+        _reset_daily_tracking(state, current_equity, now)
+
+
 def run_once(
     config: Config | None = None,
     *,
@@ -160,6 +245,9 @@ def run_once(
     cfg = config or load_config()
     if state is None:
         state = load_state(cfg)
+
+    # Initialize daily tracking if needed
+    _initialize_daily_tracking(state)
 
     try:
         state = _run_tick(cfg, state, dry_run)
@@ -186,8 +274,14 @@ def run_forever(
     if state is None:
         state = load_state(cfg)
 
+    # Initialize daily tracking if needed
+    _initialize_daily_tracking(state)
+
     while True:
         try:
+            # Re-initialize daily tracking at start of each loop iteration
+            # (in case day changed during sleep)
+            _initialize_daily_tracking(state)
             state = _run_tick(cfg, state, dry_run)
         except KeyboardInterrupt:
             logger.info("Received KeyboardInterrupt, stopping loop.")

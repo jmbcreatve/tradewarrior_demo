@@ -1,5 +1,5 @@
 # TradeWarrior Canon
-_Last updated: 2025-12-03 (Hyperliquid testnet execution adapter implementation)_
+_Last updated: 2025-12-03 (VPS → GitHub → local sync completed)_
 
 ---
 
@@ -261,5 +261,44 @@ Respect the invariants and contracts in this file; do not invent new architectur
 Foreman‑mode should update the Phase/Tasks section here when tasks are completed or added.
 
 Craftsman should, when finished with a task, propose diff updates to this file (Phase/Tasks) and to TW_LOG.md summarizing what changed.
+
+---
+
+## 9. Standard Sync / “Commit and Push” Ritual
+
+When I say “commit and push” or “sync repos”, workers must follow this workflow unless explicitly told otherwise.
+
+### 9.1 Phase3-node (VPS → GitHub)
+
+Repository: `/root/tradewarrior_demo` on phase3-node.
+
+Standard sync command sequence:
+
+```bash
+cd /root/tradewarrior_demo
+git status
+git add -A
+git commit -m "update from phase3-node" || echo "no changes to commit"
+git push origin main
+This stages all changes, creates a simple sync commit if needed, and pushes main to GitHub via SSH.
+
+9.2 Local Windows repo (GitHub → laptop)
+Repository: C:\Dev\tradewarrior_demo on my Windows laptop.
+
+Standard sync command sequence:
+
+powershell
+Copy code
+cd C:\Dev\tradewarrior_demo
+git status
+git pull origin main
+This updates the local main branch to match GitHub (and therefore phase3-node).
+
+9.3 LLM Behavior Requirements
+When asked to “commit and push”, “sync repos”, or similar, assume this ritual by default.
+
+Ask for permission only when running important actions (e.g., destructive operations, force-push, stash/drop, or changing remotes).
+
+After any significant sync or code change, update TW_LOG.md with a new one-line event and ensure TW_CANON.md stays accurate if any contracts or invariants were touched.
 
 This document is the single source of truth for how TradeWarrior is supposed to work.
