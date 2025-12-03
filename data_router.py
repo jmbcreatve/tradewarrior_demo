@@ -18,7 +18,11 @@ logger = get_logger(__name__)
 
 
 def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
-    """Construct data adapters based on config and execution mode."""
+    """Construct data adapters based on config and execution mode.
+    
+    Data adapters are always safe to use (read-only) so we include Hyperliquid
+    for real market data even in SIM mode. Only execution adapters need protection.
+    """
     if config.execution_mode == ExecutionMode.HL_MAINNET:
         # Hard safety rail: we do not support live-mainnet yet.
         raise RuntimeError(
@@ -30,13 +34,17 @@ def build_data_adapters(config: Config) -> Dict[str, BaseDataAdapter]:
         "example": ExampleDataAdapter(),
     }
 
-    if config.execution_mode == ExecutionMode.HL_TESTNET:
-        adapters["hl"] = HyperliquidDataAdapter()
-        logger.warning(
-            "ExecutionMode.HL_TESTNET selected; HyperliquidDataAdapter is wired "
-            "but health_check currently returns False, so router will fall back "
-            "to mock/example until real connectivity is implemented."
-        )
+    # Always include Hyperliquid data adapter - it's read-only and safe
+    # This allows using real market data even in SIM mode for backtesting
+    try:
+        hl_adapter = HyperliquidDataAdapter(use_testnet=False)  # Use mainnet for real data
+        if hl_adapter.health_check():
+            adapters["hl"] = hl_adapter
+            logger.info("HyperliquidDataAdapter available for real market data")
+        else:
+            logger.warning("HyperliquidDataAdapter health check failed, not adding to adapters")
+    except Exception as e:
+        logger.warning(f"Failed to initialize HyperliquidDataAdapter: {e}")
 
     return adapters
 

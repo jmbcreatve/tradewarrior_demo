@@ -33,6 +33,7 @@ class MarketSnapshot:
     recent_price_path: Dict[str, Any] = field(default_factory=dict)
     risk_context: Dict[str, Any] = field(default_factory=dict)
     risk_envelope: Dict[str, Any] = field(default_factory=dict)
+    since_last_gpt: Dict[str, Any] = field(default_factory=dict)
     gpt_state_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -52,6 +53,7 @@ class MarketSnapshot:
             "recent_price_path": dict(self.recent_price_path or {}),
             "risk_context": dict(self.risk_context or {}),
             "risk_envelope": dict(self.risk_envelope or {}),
+            "since_last_gpt": dict(self.since_last_gpt or {}),
             "gpt_state_note": self.gpt_state_note,
         }
 
@@ -94,6 +96,19 @@ def validate_snapshot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
     - Fills missing optional values with None or "unknown".
     - Never raises for normal missing data.
     """
+    def _coerce_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_int_non_negative(value: Any, default: int = 0) -> int:
+        try:
+            ivalue = int(value)
+        except (TypeError, ValueError):
+            ivalue = default
+        return ivalue if ivalue >= 0 else 0
+
     if d is None:
         d = {}
 
@@ -176,16 +191,47 @@ def validate_snapshot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
         risk_ctx["last_confidence"] = 0.0
     out["risk_context"] = risk_ctx
 
+    zero_block = {
+        "time_since_last_gpt_sec": 0.0,
+        "price_change_pct_since_last_gpt": 0.0,
+        "equity_change_since_last_gpt": 0.0,
+        "trades_since_last_gpt": 0,
+    }
+    slg_raw = _safe_get(d, "since_last_gpt", None)
+    slg_data = slg_raw if isinstance(slg_raw, dict) else {}
+    since_last_gpt: Dict[str, Any] = {
+        "time_since_last_gpt_sec": _coerce_float(
+            slg_data.get("time_since_last_gpt_sec", zero_block["time_since_last_gpt_sec"]),
+            zero_block["time_since_last_gpt_sec"],
+        ),
+        "price_change_pct_since_last_gpt": _coerce_float(
+            slg_data.get(
+                "price_change_pct_since_last_gpt",
+                zero_block["price_change_pct_since_last_gpt"],
+            ),
+            zero_block["price_change_pct_since_last_gpt"],
+        ),
+        "equity_change_since_last_gpt": _coerce_float(
+            slg_data.get(
+                "equity_change_since_last_gpt",
+                zero_block["equity_change_since_last_gpt"],
+            ),
+            zero_block["equity_change_since_last_gpt"],
+        ),
+        "trades_since_last_gpt": _coerce_int_non_negative(
+            slg_data.get(
+                "trades_since_last_gpt",
+                zero_block["trades_since_last_gpt"],
+            ),
+            zero_block["trades_since_last_gpt"],
+        ),
+    }
+    out["since_last_gpt"] = since_last_gpt
+
     # Risk envelope with safe defaults and light coercion
     risk_env_raw = _safe_get(d, "risk_envelope", None)
     risk_env_provided = "risk_envelope" in d
     risk_env_dict = risk_env_raw if isinstance(risk_env_raw, dict) else {}
-
-    def _coerce_float(value: Any, default: float = 0.0) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return default
 
     risk_env: Dict[str, Any] = {}
     for key in (

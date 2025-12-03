@@ -1,0 +1,8 @@
+# TradeWarrior development dependencies
+# Includes runtime dependencies plus testing and tooling
+
+-r requirements.txt
+
+# Testing framework
+pytest==8.3.5
+

@@ -30,6 +30,7 @@ def test_validate_snapshot_fills_defaults():
         "recent_price_path",
         "risk_context",
         "risk_envelope",
+        "since_last_gpt",
         "gpt_state_note",
     }
     assert required_keys.issubset(set(snap.keys()))
@@ -52,6 +53,19 @@ def test_validate_snapshot_fills_defaults():
         assert isinstance(risk_env[key], float)
         assert risk_env[key] == 0.0
     assert risk_env["note"] == "risk_envelope not provided"
+    slg = snap["since_last_gpt"]
+    slg_keys = {
+        "time_since_last_gpt_sec",
+        "price_change_pct_since_last_gpt",
+        "equity_change_since_last_gpt",
+        "trades_since_last_gpt",
+    }
+    assert slg_keys.issubset(set(slg.keys()))
+    assert isinstance(slg["time_since_last_gpt_sec"], float)
+    assert isinstance(slg["price_change_pct_since_last_gpt"], float)
+    assert isinstance(slg["equity_change_since_last_gpt"], float)
+    assert isinstance(slg["trades_since_last_gpt"], int)
+    assert slg["trades_since_last_gpt"] == 0
 
 
 def test_validate_snapshot_normalizes_risk_envelope():
@@ -109,3 +123,15 @@ def test_build_snapshot_returns_normalized_dict():
     for key in expected_risk_env_keys - {"note"}:
         assert isinstance(risk_env[key], float)
     assert isinstance(risk_env["note"], str)
+    slg = snap["since_last_gpt"]
+    slg_keys = {
+        "time_since_last_gpt_sec",
+        "price_change_pct_since_last_gpt",
+        "equity_change_since_last_gpt",
+        "trades_since_last_gpt",
+    }
+    assert slg_keys.issubset(set(slg.keys()))
+    assert isinstance(slg["time_since_last_gpt_sec"], float)
+    assert isinstance(slg["price_change_pct_since_last_gpt"], float)
+    assert isinstance(slg["equity_change_since_last_gpt"], float)
+    assert isinstance(slg["trades_since_last_gpt"], int)
