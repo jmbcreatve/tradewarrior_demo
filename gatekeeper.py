@@ -21,6 +21,10 @@ MIN_ABS_PRICE_PCT = 0.0005           # 0.05% move since last GPT snapshot
 MIN_SHAPE_SCORE = 0.3                # how strong microstructure must be
 EXTREME_RANGE_WEIGHT = 0.1           # extra price-move tolerance at extremes
 
+# Slow trend timeout: allow GPT call after long time even with small moves
+MIN_SECONDS_FOR_SLOW_TREND_CALL = 900  # 15 minutes - configurable threshold
+MIN_SHAPE_SCORE_FOR_SLOW_TREND = 0.2   # lower threshold for slow trend calls
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -232,6 +236,35 @@ def should_call_gpt(
     candidate = _is_candidate_setup(core, prev_snapshot)
 
     if not candidate and move_pct < move_threshold:
+        # --- Slow trend timeout path -----------------------------------------
+        # If enough time has passed and there's some drift/shape bias,
+        # allow a call even if price move is below normal threshold.
+        # This avoids "silent in slow trend" problem while keeping rate limits.
+        if (
+            time_since >= MIN_SECONDS_FOR_SLOW_TREND_CALL
+            and (
+                abs(price_change_pct) >= MIN_ABS_PRICE_PCT
+                or core["shape_score"] >= MIN_SHAPE_SCORE_FOR_SLOW_TREND
+            )
+        ):
+            # Rate limits already checked above, so we can approve
+            call_timestamps.append(now_ts)
+            state["gpt_call_timestamps"] = call_timestamps
+            state["last_gpt_call_walltime"] = now_ts
+            state["last_gpt_snapshot"] = snapshot
+
+            reason = "slow_trend_timeout"
+            logger.info(
+                "Gatekeeper: slow trend timeout (time_since=%.1fs >= %.1fs, "
+                "price_change_pct=%.5f, shape_score=%.3f); calling GPT (reason=%s).",
+                time_since,
+                MIN_SECONDS_FOR_SLOW_TREND_CALL,
+                price_change_pct,
+                core["shape_score"],
+                reason,
+            )
+            return {"should_call_gpt": True, "reason": reason}
+
         reason = "no_candidate_or_price_move"
         logger.info(
             "Gatekeeper: no candidate setup and price move %.4f < %.4f; "

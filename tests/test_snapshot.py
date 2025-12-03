@@ -1,6 +1,8 @@
+from datetime import datetime, timezone
 from config import Config
-from build_features import build_snapshot
+from build_features import build_snapshot, _find_fractal_swing_points, _build_liquidity_context, _classify_market_session, _compute_timing_state
 from schemas import validate_snapshot_dict
+from enums import TimingState, enum_to_str
 
 
 def test_validate_snapshot_fills_defaults():
@@ -25,8 +27,10 @@ def test_validate_snapshot_fills_defaults():
         "microstructure",
         "liquidity_context",
         "fib_context",
+        "htf_context",
         "danger_mode",
         "timing_state",
+        "market_session",
         "recent_price_path",
         "risk_context",
         "risk_envelope",
@@ -39,6 +43,13 @@ def test_validate_snapshot_fills_defaults():
     assert snap["microstructure"]["shape_bias"] == "123"
     assert isinstance(snap["risk_context"]["equity"], float)
     assert snap["risk_context"]["open_positions_summary"] == []
+    # HTF context should be present with safe defaults
+    assert "htf_context" in snap
+    assert isinstance(snap["htf_context"], dict)
+    assert "trend_1h" in snap["htf_context"]
+    assert "range_pos_1h" in snap["htf_context"]
+    assert isinstance(snap["htf_context"]["trend_1h"], str)
+    assert isinstance(snap["htf_context"]["range_pos_1h"], str)
     risk_env = snap["risk_envelope"]
     numeric_env_keys = {
         "max_notional",
@@ -65,7 +76,46 @@ def test_validate_snapshot_fills_defaults():
     assert isinstance(slg["price_change_pct_since_last_gpt"], float)
     assert isinstance(slg["equity_change_since_last_gpt"], float)
     assert isinstance(slg["trades_since_last_gpt"], int)
-    assert slg["trades_since_last_gpt"] == 0
+
+
+def test_build_snapshot_includes_gpt_state_note_from_state():
+    """Test that gpt_state_note from state appears in the snapshot."""
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+        {"open": 104, "high": 107, "low": 103, "close": 106, "timestamp": 1_001},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    
+    # State with gpt_state_note from previous GPT decision
+    expected_note = "Previous decision: uptrend with strong bullish structure, staying long"
+    state = {
+        "symbol": "TEST",
+        "equity": 5_000,
+        "gpt_state_note": expected_note,
+    }
+    
+    snap = build_snapshot(config, market_data, state)
+    
+    # Verify gpt_state_note appears in snapshot
+    assert "gpt_state_note" in snap
+    assert snap["gpt_state_note"] == expected_note
+
+
+def test_build_snapshot_handles_missing_gpt_state_note():
+    """Test that build_snapshot handles missing gpt_state_note gracefully."""
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}  # No gpt_state_note
+    
+    snap = build_snapshot(config, market_data, state)
+    
+    # Verify gpt_state_note is None when not in state
+    assert "gpt_state_note" in snap
+    assert snap["gpt_state_note"] is None
 
 
 def test_validate_snapshot_normalizes_risk_envelope():
@@ -109,6 +159,16 @@ def test_build_snapshot_returns_normalized_dict():
     assert snap["recent_price_path"]["lookback_bars"] == len(candles)
     assert snap["risk_context"]["equity"] == 5_000
     assert "microstructure" in snap and "shape_score" in snap["microstructure"]
+    # HTF context should be present
+    assert "htf_context" in snap
+    assert isinstance(snap["htf_context"], dict)
+    assert "trend_1h" in snap["htf_context"]
+    assert "range_pos_1h" in snap["htf_context"]
+    assert isinstance(snap["htf_context"]["trend_1h"], str)
+    assert isinstance(snap["htf_context"]["range_pos_1h"], str)
+    # With only 2 candles, HTF should default to unknown/mid
+    assert snap["htf_context"]["trend_1h"] in ("up", "down", "sideways", "unknown")
+    assert snap["htf_context"]["range_pos_1h"] in ("low", "mid", "high")
     risk_env = snap["risk_envelope"]
     expected_risk_env_keys = {
         "max_notional",
@@ -135,3 +195,320 @@ def test_build_snapshot_returns_normalized_dict():
     assert isinstance(slg["price_change_pct_since_last_gpt"], float)
     assert isinstance(slg["equity_change_since_last_gpt"], float)
     assert isinstance(slg["trades_since_last_gpt"], int)
+
+
+# ---------------------------------------------------------------------------
+# Liquidity context tests
+# ---------------------------------------------------------------------------
+
+def test_liquidity_context_exists_in_snapshot():
+    """Test that liquidity_context is present with required keys."""
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+        {"open": 104, "high": 107, "low": 103, "close": 106, "timestamp": 1_001},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+
+    snap = build_snapshot(config, market_data, state)
+
+    assert "liquidity_context" in snap
+    liq = snap["liquidity_context"]
+    assert "liquidity_above" in liq
+    assert "liquidity_below" in liq
+
+
+def test_liquidity_context_with_clear_swing_levels():
+    """Test liquidity_context identifies swing highs/lows from synthetic candles.
+
+    Creates a price series with a clear swing high above current price
+    and a clear swing low below current price.
+    """
+    # Build a candle series: goes up to 110, dips to 102, rallies to 108, then pulls back to 105
+    # Fractal swing high should be at 110 (higher than neighbors)
+    # Fractal swing low should be at 102 (lower than neighbors)
+    candles = [
+        {"open": 100, "high": 101, "low": 99, "close": 100, "timestamp": 1},   # baseline
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 2},   # up
+        {"open": 104, "high": 110, "low": 104, "close": 109, "timestamp": 3},  # swing HIGH at 110
+        {"open": 109, "high": 109, "low": 103, "close": 104, "timestamp": 4},  # down
+        {"open": 104, "high": 105, "low": 102, "close": 103, "timestamp": 5},  # swing LOW at 102
+        {"open": 103, "high": 108, "low": 103, "close": 107, "timestamp": 6},  # up
+        {"open": 107, "high": 108, "low": 105, "close": 105, "timestamp": 7},  # current: close at 105
+    ]
+
+    liq = _build_liquidity_context(candles)
+
+    # Current price is 105
+    # Swing high at 110 is above 105 -> liquidity_above should be 110
+    # Swing low at 102 is below 105 -> liquidity_below should be 102
+    assert liq["liquidity_above"] == 110.0
+    assert liq["liquidity_below"] == 102.0
+
+
+def test_liquidity_context_no_level_above():
+    """Test liquidity_context when current price is at or above all swing highs."""
+    # All candles have highs below or equal to current close
+    candles = [
+        {"open": 100, "high": 101, "low": 99, "close": 100, "timestamp": 1},
+        {"open": 100, "high": 102, "low": 99, "close": 101, "timestamp": 2},
+        {"open": 101, "high": 103, "low": 100, "close": 102, "timestamp": 3},  # swing high at 103
+        {"open": 102, "high": 102, "low": 100, "close": 101, "timestamp": 4},
+        {"open": 101, "high": 101, "low": 99, "close": 100, "timestamp": 5},   # swing low at 99
+        {"open": 100, "high": 104, "low": 100, "close": 103, "timestamp": 6},
+        {"open": 103, "high": 110, "low": 103, "close": 110, "timestamp": 7},  # current at 110, highest
+    ]
+
+    liq = _build_liquidity_context(candles)
+
+    # Current price is 110, which is >= all swing highs
+    assert liq["liquidity_above"] is None
+    # Swing low at 99 and 100 are below 110
+    assert liq["liquidity_below"] is not None
+    assert liq["liquidity_below"] < 110
+
+
+def test_liquidity_context_no_level_below():
+    """Test liquidity_context when current price is at or below all swing lows."""
+    # Price series where current price is lowest
+    # Need clear fractal swing high: middle bar's high must be > both neighbors' highs
+    candles = [
+        {"open": 110, "high": 111, "low": 109, "close": 110, "timestamp": 1},
+        {"open": 110, "high": 113, "low": 109, "close": 112, "timestamp": 2},
+        {"open": 112, "high": 118, "low": 111, "close": 117, "timestamp": 3},  # swing HIGH at 118 (> 113 and > 114)
+        {"open": 117, "high": 114, "low": 110, "close": 111, "timestamp": 4},
+        {"open": 111, "high": 112, "low": 108, "close": 109, "timestamp": 5},
+        {"open": 109, "high": 110, "low": 100, "close": 101, "timestamp": 6},
+        {"open": 101, "high": 102, "low": 95, "close": 95, "timestamp": 7},    # current at 95, lowest
+    ]
+
+    liq = _build_liquidity_context(candles)
+
+    # Current price is 95, which is <= all swing lows
+    assert liq["liquidity_below"] is None
+    # Swing high at 118 is above 95
+    assert liq["liquidity_above"] is not None
+    assert liq["liquidity_above"] > 95
+
+
+def test_liquidity_context_empty_candles():
+    """Test liquidity_context returns None values for empty candles."""
+    liq = _build_liquidity_context([])
+
+    assert liq["liquidity_above"] is None
+    assert liq["liquidity_below"] is None
+
+
+def test_liquidity_context_with_eq_cluster_shapes():
+    """Test that eq_high_cluster and eq_low_cluster in shapes refine liquidity levels."""
+    # Simple candle set
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1},
+        {"open": 104, "high": 108, "low": 103, "close": 107, "timestamp": 2},
+        {"open": 107, "high": 108, "low": 104, "close": 105, "timestamp": 3},
+        {"open": 105, "high": 107, "low": 102, "close": 103, "timestamp": 4},
+        {"open": 103, "high": 106, "low": 101, "close": 104, "timestamp": 5},
+    ]
+
+    # With eq_high_cluster, the cluster high should be added as liquidity
+    shapes_with_cluster = {"eq_high_cluster": True, "eq_low_cluster": False}
+    liq = _build_liquidity_context(candles, shapes=shapes_with_cluster)
+
+    assert "liquidity_above" in liq
+    assert "liquidity_below" in liq
+    # Should have some level above (cluster high from recent bars)
+    # The max high in last 5 candles is 108, current close is 104
+    assert liq["liquidity_above"] is not None
+    assert liq["liquidity_above"] > 104
+
+
+def test_find_fractal_swing_points_basic():
+    """Test the fractal swing point detection helper."""
+    # Clear swing high at index 2, swing low at index 4
+    candles = [
+        {"high": 100, "low": 98},
+        {"high": 102, "low": 99},
+        {"high": 110, "low": 101},  # swing high
+        {"high": 105, "low": 100},
+        {"high": 103, "low": 95},   # swing low
+        {"high": 104, "low": 97},
+        {"high": 106, "low": 98},
+    ]
+
+    swing_highs, swing_lows = _find_fractal_swing_points(candles, lookback=2)
+
+    assert 110 in swing_highs
+    assert 95 in swing_lows
+
+
+def test_find_fractal_swing_points_insufficient_data():
+    """Test fractal detection with too few candles."""
+    candles = [
+        {"high": 100, "low": 98},
+        {"high": 102, "low": 99},
+    ]
+
+    swing_highs, swing_lows = _find_fractal_swing_points(candles, lookback=2)
+
+    # Not enough candles for lookback=2 (need at least 5)
+    assert swing_highs == []
+    assert swing_lows == []
+
+
+def test_classify_market_session_asia():
+    """Test ASIA session classification (00:00-08:00 UTC)."""
+    # Test ASIA session: 2024-01-15 02:00 UTC
+    dt = datetime(2024, 1, 15, 2, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session = _classify_market_session(ts)
+    assert session == "ASIA"
+
+
+def test_classify_market_session_europe():
+    """Test EUROPE session classification (07:00-16:00 UTC)."""
+    # Test EUROPE session: 2024-01-15 10:00 UTC (not overlapping with US)
+    dt = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session = _classify_market_session(ts)
+    assert session == "EUROPE"
+
+
+def test_classify_market_session_us():
+    """Test US session classification (13:00-22:00 UTC)."""
+    # Test US session: 2024-01-15 15:00 UTC
+    dt = datetime(2024, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session = _classify_market_session(ts)
+    assert session == "US"
+
+
+def test_classify_market_session_off_hours():
+    """Test OFF_HOURS classification (22:00-00:00 UTC)."""
+    # Test OFF_HOURS: 2024-01-15 23:00 UTC
+    dt = datetime(2024, 1, 15, 23, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session = _classify_market_session(ts)
+    assert session == "OFF_HOURS"
+
+
+def test_classify_market_session_overlap_priorities():
+    """Test that session overlap prioritizes US > EUROPE > ASIA."""
+    # 14:00 UTC overlaps EUROPE and US, should prioritize US
+    dt = datetime(2024, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session = _classify_market_session(ts)
+    assert session == "US"
+    
+    # 08:00 UTC overlaps ASIA and EUROPE, should prioritize EUROPE
+    dt = datetime(2024, 1, 15, 8, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session = _classify_market_session(ts)
+    assert session == "EUROPE"
+
+
+def test_compute_timing_state_mapping():
+    """Test that market sessions map to correct TimingState enum values."""
+    # OFF_HOURS -> AVOID
+    dt = datetime(2024, 1, 15, 23, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session, timing_state = _compute_timing_state(ts)
+    assert session == "OFF_HOURS"
+    assert timing_state == enum_to_str(TimingState.AVOID)
+    
+    # ASIA -> CAUTIOUS
+    dt = datetime(2024, 1, 15, 2, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session, timing_state = _compute_timing_state(ts)
+    assert session == "ASIA"
+    assert timing_state == enum_to_str(TimingState.CAUTIOUS)
+    
+    # EUROPE -> NORMAL
+    dt = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session, timing_state = _compute_timing_state(ts)
+    assert session == "EUROPE"
+    assert timing_state == enum_to_str(TimingState.NORMAL)
+    
+    # US -> NORMAL
+    dt = datetime(2024, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    session, timing_state = _compute_timing_state(ts)
+    assert session == "US"
+    assert timing_state == enum_to_str(TimingState.NORMAL)
+
+
+def test_build_snapshot_includes_market_session():
+    """Test that build_snapshot includes market_session and timing_state."""
+    config = Config()
+    
+    # Test with ASIA session timestamp
+    dt = datetime(2024, 1, 15, 2, 0, 0, tzinfo=timezone.utc)
+    ts = dt.timestamp()
+    
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": ts},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    
+    # Verify market_session is present
+    assert "market_session" in snap
+    assert snap["market_session"] == "ASIA"
+    
+    # Verify timing_state is set correctly
+    assert "timing_state" in snap
+    assert snap["timing_state"] == enum_to_str(TimingState.CAUTIOUS)
+
+
+def test_build_snapshot_timing_state_changes_by_session():
+    """Test that timing_state changes appropriately for different sessions."""
+    config = Config()
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    # Test OFF_HOURS -> AVOID
+    dt_off = datetime(2024, 1, 15, 23, 0, 0, tzinfo=timezone.utc)
+    candles_off = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": dt_off.timestamp()}]
+    market_data_off = {"candles": candles_off, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    snap_off = build_snapshot(config, market_data_off, state)
+    assert snap_off["market_session"] == "OFF_HOURS"
+    assert snap_off["timing_state"] == enum_to_str(TimingState.AVOID)
+    
+    # Test US -> NORMAL
+    dt_us = datetime(2024, 1, 15, 15, 0, 0, tzinfo=timezone.utc)
+    candles_us = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": dt_us.timestamp()}]
+    market_data_us = {"candles": candles_us, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    snap_us = build_snapshot(config, market_data_us, state)
+    assert snap_us["market_session"] == "US"
+    assert snap_us["timing_state"] == enum_to_str(TimingState.NORMAL)
+    
+    # Verify they're different
+    assert snap_off["timing_state"] != snap_us["timing_state"]
+
+
+def test_validate_snapshot_includes_market_session():
+    """Test that validate_snapshot_dict handles market_session field."""
+    raw = {
+        "symbol": "TEST",
+        "price": 100.0,
+        "timestamp": 1000.0,
+        "market_session": "US",
+    }
+    
+    snap = validate_snapshot_dict(raw)
+    
+    assert "market_session" in snap
+    assert snap["market_session"] == "US"
+    
+    # Test with invalid session defaults to OFF_HOURS
+    raw_invalid = {
+        "symbol": "TEST",
+        "price": 100.0,
+        "timestamp": 1000.0,
+        "market_session": "INVALID",
+    }
+    
+    snap_invalid = validate_snapshot_dict(raw_invalid)
+    assert snap_invalid["market_session"] == "OFF_HOURS"

@@ -28,8 +28,10 @@ class MarketSnapshot:
     microstructure: Dict[str, Any] = field(default_factory=dict)
     liquidity_context: Dict[str, Any] = field(default_factory=dict)
     fib_context: Dict[str, Any] = field(default_factory=dict)
+    htf_context: Dict[str, Any] = field(default_factory=dict)
     danger_mode: bool = False
     timing_state: str = field(default_factory=lambda: enum_to_str(TimingState.UNKNOWN))
+    market_session: str = "OFF_HOURS"  # Raw session label: "ASIA", "EUROPE", "US", "OFF_HOURS"
     recent_price_path: Dict[str, Any] = field(default_factory=dict)
     risk_context: Dict[str, Any] = field(default_factory=dict)
     risk_envelope: Dict[str, Any] = field(default_factory=dict)
@@ -48,8 +50,10 @@ class MarketSnapshot:
             "microstructure": dict(self.microstructure or {}),
             "liquidity_context": dict(self.liquidity_context or {}),
             "fib_context": dict(self.fib_context or {}),
+            "htf_context": dict(self.htf_context or {}),
             "danger_mode": bool(self.danger_mode),
             "timing_state": str(self.timing_state),
+            "market_session": str(self.market_session),
             "recent_price_path": dict(self.recent_price_path or {}),
             "risk_context": dict(self.risk_context or {}),
             "risk_envelope": dict(self.risk_envelope or {}),
@@ -157,10 +161,23 @@ def validate_snapshot_dict(d: Dict[str, Any]) -> Dict[str, Any]:
         "micro_zone": fib.get("micro_zone", "unknown"),
     }
 
+    # HTF context
+    htf = dict(_safe_get(d, "htf_context", {}) or {})
+    out["htf_context"] = {
+        "trend_1h": str(htf.get("trend_1h", "unknown")),
+        "range_pos_1h": str(htf.get("range_pos_1h", "mid")),
+    }
+
     out["danger_mode"] = bool(_safe_get(d, "danger_mode", False))
 
     timing_enum = coerce_enum(str(_safe_get(d, "timing_state", "unknown")), TimingState, TimingState.UNKNOWN)
     out["timing_state"] = enum_to_str(timing_enum)
+    
+    # Market session label (raw string: "ASIA", "EUROPE", "US", "OFF_HOURS")
+    market_session_raw = str(_safe_get(d, "market_session", "OFF_HOURS"))
+    # Validate it's one of the expected values
+    valid_sessions = {"ASIA", "EUROPE", "US", "OFF_HOURS"}
+    out["market_session"] = market_session_raw if market_session_raw in valid_sessions else "OFF_HOURS"
 
     # New: recent_price_path and risk_context and gpt_state_note
     rpp = dict(_safe_get(d, "recent_price_path", {}) or {})

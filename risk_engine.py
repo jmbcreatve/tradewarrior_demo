@@ -125,6 +125,14 @@ def evaluate_risk(
 
     def _log_risk_event(decision: RiskDecision, env: RiskEnvelope | None) -> None:
         try:
+            # Calculate stop distance if we have stop_loss and price
+            stop_distance_pct = None
+            if decision.stop_loss_price and price > 0:
+                if decision.side == "long":
+                    stop_distance_pct = abs((price - decision.stop_loss_price) / price)
+                elif decision.side == "short":
+                    stop_distance_pct = abs((decision.stop_loss_price - price) / price)
+            
             event = {
                 "type": "risk_decision",
                 "symbol": symbol,
@@ -138,10 +146,17 @@ def evaluate_risk(
                 "leverage": decision.leverage,
                 "stop_loss_price": decision.stop_loss_price,
                 "take_profit_price": decision.take_profit_price,
+                "stop_distance_pct": stop_distance_pct,
                 "reason": decision.reason,
-                "env_max_notional": env.max_notional if env else None,
-                "env_max_leverage": env.max_leverage if env else None,
-                "env_max_risk_pct": env.max_risk_per_trade_pct if env else None,
+                "risk_envelope": {
+                    "max_notional": env.max_notional if env else None,
+                    "max_leverage": env.max_leverage if env else None,
+                    "max_risk_per_trade_pct": env.max_risk_per_trade_pct if env else None,
+                    "min_stop_distance_pct": env.min_stop_distance_pct if env else None,
+                    "max_stop_distance_pct": env.max_stop_distance_pct if env else None,
+                    "max_daily_loss_pct": env.max_daily_loss_pct if env else None,
+                    "note": env.note if env else None,
+                },
                 "danger_mode": danger_mode,
                 "timing_state": timing_enum.value if isinstance(timing_enum, TimingState) else timing_enum,
             }
@@ -220,6 +235,10 @@ def evaluate_risk(
             effective_env = compute_risk_envelope(config, equity, vol_enum, danger_mode, timing_enum)
     else:
         effective_env = compute_risk_envelope(config, equity, vol_enum, danger_mode, timing_enum)
+
+    # Store effective envelope in state for execution logging
+    if effective_env:
+        state["last_risk_envelope"] = effective_env.to_dict()
 
     cfg_risk_pct = max(config.risk_per_trade, 0.0)
     env_risk_pct = max(0.0, effective_env.max_risk_per_trade_pct)

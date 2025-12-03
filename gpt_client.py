@@ -29,7 +29,7 @@ def _load_brain_prompt() -> str:
         _BRAIN_PROMPT_CACHE = (
             "You are the reasoning layer of an automated trading system. "
             "You will receive a JSON snapshot of market state and must respond ONLY with JSON "
-            "containing keys: action, confidence, notes."
+            "containing keys: action, size, confidence, rationale."
         )
         return _BRAIN_PROMPT_CACHE
 
@@ -137,7 +137,8 @@ def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
 
         action = str(data.get("action", "flat")).lower()
         confidence = float(data.get("confidence", 0.0))
-        notes = str(data.get("notes", ""))
+        # Parse "rationale" from GPT response (as per brain.txt), with fallback to "notes" for backward compatibility
+        notes = str(data.get("rationale", data.get("notes", "")))
 
         if action not in ("long", "short", "flat"):
             action = "flat"

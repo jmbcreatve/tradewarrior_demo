@@ -1,3 +1,6 @@
+import json
+import re
+
 from config import Config
 from enums import Side
 from risk_engine import evaluate_risk
@@ -104,3 +107,105 @@ def test_risk_envelope_blocks_when_zeroed():
     assert decision.approved is False
     assert decision.side == Side.FLAT.value
     assert "risk envelope" in decision.reason.lower()
+
+
+def test_risk_logs_envelope_and_decision_for_approved_trade(caplog):
+    """Verify that approved trades log both risk_envelope and risk_decision info."""
+    config = Config(risk_per_trade=0.01, max_leverage=3.0)
+    snapshot = {
+        "symbol": "BTCUSDT",
+        "timestamp": 1000.0,
+        "price": 100.0,
+        "volatility_mode": "normal",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.01,
+            "max_leverage": 3.0,
+            "max_notional": 5000.0,
+            "min_stop_distance_pct": 0.005,
+            "max_stop_distance_pct": 0.03,
+            "max_daily_loss_pct": 0.03,
+            "note": "baseline_vol;timing_normal",
+        },
+    }
+    state = {"equity": 10_000}
+
+    with caplog.at_level("INFO"):
+        decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=0.8), state, config)
+
+    assert decision.approved is True
+    assert decision.side == Side.LONG.value
+    
+    # Find the RiskDecision event log
+    risk_log_found = False
+    for record in caplog.records:
+        if "RiskDecision event:" in record.message:
+            risk_log_found = True
+            msg = record.message
+            
+            # Verify risk_envelope is present in the log
+            assert "risk_envelope" in msg or "'risk_envelope'" in msg, f"risk_envelope not found in log: {msg}"
+            
+            # Verify envelope note is present
+            assert "note" in msg or "'note'" in msg, f"note not found in log: {msg}"
+            
+            # Verify RiskDecision fields are present
+            assert "approved" in msg or "'approved'" in msg, f"approved not found in log: {msg}"
+            assert "side" in msg or "'side'" in msg, f"side not found in log: {msg}"
+            assert "position_size" in msg or "'position_size'" in msg, f"position_size not found in log: {msg}"
+            assert "leverage" in msg or "'leverage'" in msg, f"leverage not found in log: {msg}"
+            assert "stop_loss_price" in msg or "'stop_loss_price'" in msg, f"stop_loss_price not found in log: {msg}"
+            assert "stop_distance_pct" in msg or "'stop_distance_pct'" in msg, f"stop_distance_pct not found in log: {msg}"
+            
+            # Verify envelope fields are present
+            assert "max_notional" in msg or "'max_notional'" in msg, f"max_notional not found in log: {msg}"
+            assert "max_leverage" in msg or "'max_leverage'" in msg, f"max_leverage not found in log: {msg}"
+            assert "max_risk_per_trade_pct" in msg or "'max_risk_per_trade_pct'" in msg, f"max_risk_per_trade_pct not found in log: {msg}"
+            
+            break
+    
+    assert risk_log_found, "RiskDecision event log not found"
+    
+    # Verify envelope was stored in state
+    assert "last_risk_envelope" in state
+    assert state["last_risk_envelope"] is not None
+    assert "note" in state["last_risk_envelope"]
+
+
+def test_risk_logs_envelope_note_for_volatility_tightening(caplog):
+    """Verify that envelope note shows volatility-based tightening."""
+    config = Config(risk_per_trade=0.01, max_leverage=3.0)
+    snapshot = {
+        "symbol": "BTCUSDT",
+        "timestamp": 1000.0,
+        "price": 100.0,
+        "volatility_mode": "high",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+    }
+    state = {"equity": 10_000}
+
+    with caplog.at_level("INFO"):
+        decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=0.8), state, config)
+
+    assert decision.approved is True
+    
+    # Find the RiskDecision event log
+    for record in caplog.records:
+        if "RiskDecision event:" in record.message:
+            # Check that the log contains envelope info
+            assert "risk_envelope" in record.message or "'risk_envelope'" in record.message
+            # Check for note field (should contain "trim_for_vol" for high volatility)
+            assert "note" in record.message or "'note'" in record.message
+            # The note should indicate volatility trimming
+            if "trim_for_vol" in record.message:
+                break
+    
+    # Verify envelope note in state contains volatility info
+    assert "last_risk_envelope" in state
+    assert state["last_risk_envelope"] is not None
+    envelope_note = state["last_risk_envelope"].get("note", "")
+    assert "trim_for_vol" in envelope_note or "vol" in envelope_note.lower()

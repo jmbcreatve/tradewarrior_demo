@@ -69,13 +69,28 @@ def build_execution_adapters(config: Config) -> Dict[str, BaseExecutionAdapter]:
         "example": ExampleExecutionAdapter(),
     }
 
+    # Only add Hyperliquid execution adapter when explicitly in testnet mode
     if config.execution_mode == ExecutionMode.HL_TESTNET:
-        adapters["hl"] = HyperliquidExecutionAdapter()
-        logger.warning(
-            "ExecutionMode.HL_TESTNET selected; HyperliquidExecutionAdapter is wired "
-            "but health_check currently returns False, so router will fall back "
-            "to mock/example until real connectivity is implemented."
-        )
+        try:
+            hl_exec_adapter = HyperliquidExecutionAdapter(use_testnet=True)
+            # Only add if health check passes
+            if hl_exec_adapter.health_check():
+                adapters["hl"] = hl_exec_adapter
+                logger.info(
+                    "ExecutionMode.HL_TESTNET selected; HyperliquidExecutionAdapter initialized "
+                    "and health check passed. Real testnet orders will be placed."
+                )
+            else:
+                logger.warning(
+                    "ExecutionMode.HL_TESTNET selected but HyperliquidExecutionAdapter health check failed. "
+                    "Will fall back to mock/example adapters. Check credentials and network connectivity."
+                )
+        except Exception as e:
+            logger.error(
+                "Failed to initialize HyperliquidExecutionAdapter for testnet: %s. "
+                "Will fall back to mock/example adapters.",
+                e
+            )
 
     return adapters
 

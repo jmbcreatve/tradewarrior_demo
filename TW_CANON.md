@@ -1,5 +1,5 @@
 # TradeWarrior Canon
-_Last updated: 2025-12-03_
+_Last updated: 2025-12-03 (Hyperliquid testnet execution adapter implementation)_
 
 ---
 
@@ -46,23 +46,24 @@ When starting a new chat, the model should be told which role it is playing and 
 |--------------------------------|---------|
 | `config.py`                    | Runtime configuration (symbol, risk caps, intervals, paths, testnet mode, initial equity). |
 | `engine.py`                    | Main orchestrator loop for live/demo trading. |
-| `build_features.py`            | Builds snapshot dict from raw market data + shapes. |
+| `build_features.py`            | Builds snapshot dict from raw market data + shapes. Computes liquidity context from fractal swing points, market session classification, and timing state. |
 | `shapes_module.py`             | Deterministic microstructure features (sweeps, FVGs, CHoCH, etc.). |
-| `gatekeeper.py`                | Decides whether to call GPT on a given tick (movement, timing, danger). |
-| `gpt_client.py`                | Wraps GPT call + prompt + JSON parsing into a `GptDecision`. |
+| `gatekeeper.py`                | Decides whether to call GPT on a given tick (movement, timing, danger). Enforces rate limits (12 calls/hour, 60s spacing) and includes slow trend timeout (15min) to avoid silent periods during slow drifts. |
+| `gpt_client.py`                | Wraps GPT call + prompt + JSON parsing into a `GptDecision`. Parses "rationale" field from GPT response (with fallback to "notes" for compatibility) and maps to `GptDecision.notes`. |
 | `risk_envelope.py`             | Defines `RiskEnvelope` and helpers for computing envelope limits. |
-| `risk_engine.py`               | Applies risk rules and envelopes to a GPT decision → `RiskDecision`. |
-| `execution_engine.py`         | Takes a `RiskDecision` and routes to an execution adapter. |
+| `risk_engine.py`               | Applies risk rules and envelopes to a GPT decision → `RiskDecision`. Logs full risk_envelope (including note) and RiskDecision details (size, leverage, stop distances) for every trade decision. |
+| `execution_engine.py`         | Takes a `RiskDecision` and routes to an execution adapter. Logs execution events and traces including risk_envelope and RiskDecision info for approved trades. |
 | `adapters/base_execution_adapter.py` | Base interface for execution adapters. |
 | `adapters/mock_execution_adapter.py` | Demo/mock execution adapter for testing. |
 | `adapters/replay_execution_adapter.py` | Replay adapter for backtests; simulates fills & positions. |
 | `adapters/example_data_adapter.py`     | Example candle data adapter. |
-| `adapters/hyperliquid_*`      | Hyperliquid data/execution adapters (SIM/TESTNET). |
+| `adapters/liqdata.py`         | Hyperliquid data adapter for real market data (testnet/mainnet). |
+| `adapters/liqexec.py`         | Hyperliquid execution adapter for real testnet order placement (market orders only, testnet-only safety). |
 | `replay_engine.py`            | Backtest harness using the same spine plus replay adapters. |
 | `state_memory.py`             | Persistent JSON state management (load/validate/save). |
 | `logger_utils.py`             | Central logging setup. |
 | `run_testnet.py`              | Testnet runner script for Hyperliquid testnet trading with safety banners and configuration. |
-| `tests/`                      | Unit and integration tests for snapshot, gatekeeper, GPT client, risk envelope/engine, execution, replay parity, etc. |
+| `tests/`                      | Unit and integration tests for snapshot, gatekeeper, GPT client, risk envelope/engine, execution, replay parity, Hyperliquid adapters, etc. |
 
 ---
 
@@ -76,20 +77,24 @@ If you change them, update this file and the tests.
 `build_snapshot` must produce a dict including at least:
 
 - `symbol`: str
-- `timestamp`: float or ISO string
+- `timestamp`: float (unix seconds)
 - `price`: float (last/close)
-- `trend`: str (`"up" | "down" | "flat"`)
-- `range_position`: float in `[0.0, 1.0]` (where price sits in recent range)
-- `volatility_mode`: str (e.g. `"low" | "normal" | "high"`)
-- `shapes`: dict with keys such as `sweep_up`, `sweep_down`, `fvg_up`, `fvg_down`, `choch_direction`, `compression_active`, `shape_bias`, `shape_score`
-- `recent_price_path`: small struct or list of recent candles/prices
-- `fib_context`: any fib/structural context used
-- `liquidity_context`: levels/liquidity hints
-- `flow_context`: basic flow/volume hints
+- `trend`: str (`"up" | "down" | "sideways" | "unknown"`)
+- `range_position`: str (`"extreme_low" | "low" | "mid" | "high" | "extreme_high" | "unknown"`)
+- `volatility_mode`: str (`"low" | "normal" | "high" | "explosive" | "unknown"`)
+- `flow`: dict with `funding`, `open_interest`, `skew`, `skew_bias`
+- `microstructure`: dict with keys such as `sweep_up`, `sweep_down`, `fvg_up`, `fvg_down`, `choch_direction`, `compression_active`, `shape_bias`, `shape_score`
+- `liquidity_context`: dict with `liquidity_above` (float or None) and `liquidity_below` (float or None) - computed from fractal swing points and recent extremes
+- `fib_context`: dict with `macro_zone` and `micro_zone` (e.g. `"macro_discount" | "macro_premium"`)
+- `htf_context`: dict with `trend_1h` and `range_pos_1h` (higher-timeframe context; currently placeholder)
 - `danger_mode`: bool (true when environment is dangerous; risk should clamp hard)
-- `timing_state`: str (e.g. `"OK" | "AVOID"`)
-- `gpt_state_note`: short text note coming from prior GPT decisions (agent memory stub)
-- `risk_envelope`: optional pre‑computed `RiskEnvelope` snapshot
+- `timing_state`: str (`"avoid" | "cautious" | "normal" | "aggressive" | "unknown"`) - derived from market session
+- `market_session`: str (`"ASIA" | "EUROPE" | "US" | "OFF_HOURS"`) - raw session label based on UTC hour
+- `recent_price_path`: dict with `ret_1`, `ret_5`, `ret_15`, `impulse_state`, `lookback_bars`
+- `risk_context`: dict with `equity`, `max_drawdown`, `open_positions_summary`, `last_action`, `last_confidence`
+- `risk_envelope`: dict with risk limits (`max_notional`, `max_leverage`, `max_risk_per_trade_pct`, etc.)
+- `since_last_gpt`: dict with time/price/equity changes since last GPT call
+- `gpt_state_note`: str or None (short text note from prior GPT decisions)
 
 Implementation detail may extend this; tests and GPT prompt should always assume these fields exist.
 
@@ -106,13 +111,18 @@ GPT must return a JSON object shaped as:
   "confidence": 0.0_to_1.0,
   "rationale": "short explanation string"
 }
-Notes:
+```
 
-size is a fraction of max allowed size, not absolute notional.
+**Field consistency:**
+- The `rationale` field is the canonical name in the GPT prompt (`brain.txt`) and JSON response.
+- `gpt_client.py` parses `rationale` from the GPT response and maps it to `GptDecision.notes` internally.
+- The rationale flows through: GPT response → `GptDecision.notes` → `state["gpt_state_note"]` → next snapshot's `gpt_state_note` field.
+- For backward compatibility, `gpt_client.py` falls back to parsing `notes` if `rationale` is missing.
 
-confidence is interpreted as model conviction; risk engine can further scale based on regime.
-
-On any parse failure, gpt_client must fall back to action="flat", size=0.0, confidence=0.0 with a clear log entry.
+**Notes:**
+- `size` is a fraction of max allowed size, not absolute notional.
+- `confidence` is interpreted as model conviction; risk engine can further scale based on regime.
+- On any parse failure, `gpt_client` must fall back to `action="flat"`, `size=0.0`, `confidence=0.0` with a clear log entry.
 
 5.3 RiskEnvelope schema (v1)
 RiskEnvelope defines caps for this decision:
@@ -121,13 +131,17 @@ max_leverage: float
 
 max_notional: float (absolute value cap for position notional)
 
-max_risk_pct: float (max % of equity to risk on the trade)
+max_risk_per_trade_pct: float (max % of equity to risk on the trade)
 
-danger_flag: bool (if true, risk engine should be extremely conservative or flat)
+min_stop_distance_pct: float (minimum stop distance as fraction of price)
 
-notes: optional string for debugging / logging
+max_stop_distance_pct: float (maximum stop distance as fraction of price)
 
-Risk engine must never exceed these limits even if config and GPT suggest otherwise.
+max_daily_loss_pct: float (maximum daily loss percentage)
+
+note: string (explains why envelope was tightened, e.g. "baseline_vol;timing_normal", "trim_for_vol;timing_cautious", "danger_mode")
+
+Risk engine must never exceed these limits even if config and GPT suggest otherwise. The envelope and its note are logged for every trade decision to enable audit of risk behavior during testnet runs.
 
 5.4 RiskDecision / Decision object (v1)
 Internal object passed from risk engine to execution engine:
@@ -172,8 +186,9 @@ Active tasks:
  Restore config.py and get pytest collecting tests without import errors.
 (We now have a stable baseline after the HL refactor; this unblocks all other work.)
 
- Lock GPT Action schema v1 in code and prompt
-(Ensure gpt_client.py and the brain prompt both enforce the action/size/confidence/rationale contract so future changes don’t silently break parsing.)
+ ✅ Lock GPT Action schema v1 in code and prompt
+(Ensure gpt_client.py and the brain prompt both enforce the action/size/confidence/rationale contract so future changes don't silently break parsing.)
+**Status:** Complete. Fixed inconsistency where brain.txt specified "rationale" but gpt_client.py parsed "notes". Now parses "rationale" with fallback to "notes" for compatibility. Verified end-to-end flow with tests.
 
  Stabilize RiskEnvelope schema and validation
 (Align risk_envelope.py and risk_engine.py on the exact fields and make tests fail loudly if an envelope is missing or malformed.)
@@ -183,6 +198,7 @@ Active tasks:
 
  Harden GPT JSON parsing + add tests
 (Update gpt_client.call_gpt to handle malformed responses gracefully and add tests so that any format drift is caught immediately.)
+**Progress:** Added tests for rationale/notes field parsing and end-to-end flow verification. General malformed response handling may need additional hardening.
 
  Ensure replay parity trace is implemented and tested
 (Have replay_engine emit a parity trace structure and make tests assert that live vs replay see identical decisions for the same data.)
@@ -213,10 +229,16 @@ Phase 4 – Stateful “Moving Picture” GPT Agent
 Add rolling memory and regime summaries for GPT while preserving v1 contract.
 
 Phase 5 – Hyperliquid SIM Integration
-Wire Hyperliquid data + execution adapters into both live and replay in SIM/testnet mode.
+**Status:** 🚧 Partially complete
+- ✅ Hyperliquid data adapter implemented (testnet/mainnet)
+- ✅ Hyperliquid testnet execution adapter implemented (market orders only, testnet-only)
+- ⏳ Replay integration with Hyperliquid data adapter
+- ⏳ Mainnet execution adapter (currently disabled for safety)
 
 Phase 6 – Hyperliquid Testnet / Live under Strict Envelopes
-Add budget caps, daily loss limits, circuit breakers, and kill switch guarding all external orders.
+**Status:** ⏳ Not started
+- Add budget caps, daily loss limits, circuit breakers, and kill switch guarding all external orders.
+- Mainnet execution requires explicit approval and additional safety rails beyond testnet.
 
 7. Editing Policy (for Craftsman)
 Tier 1 files (core, high‑risk):
@@ -241,26 +263,3 @@ Foreman‑mode should update the Phase/Tasks section here when tasks are complet
 Craftsman should, when finished with a task, propose diff updates to this file (Phase/Tasks) and to TW_LOG.md summarizing what changed.
 
 This document is the single source of truth for how TradeWarrior is supposed to work.
-
-yaml
-Copy code
-
----
-
-### `TW_LOG.md` (full replacement)
-
-```markdown
-# TradeWarrior Log
-
-This file is a terse, chronological log of important decisions and milestones.  
-Each line should be one clear event; details belong in commits and TW_CANON.md.
-
----
-
-- 2025-11-26 – Initialized TradeWarrior repo, added gitignore and removed pycache.  
-- 2025-11-30 – Added Hyperliquid adapters (placeholders), refactored data routing, and cleaned up stray SSH config and state/log files.  
-- 2025-12-01 – Completed initial HL refactor: introduced risk envelope, replay execution adapter, and expanded tests for replay and risk engine.  
-- 2025-12-01 – Phase 1 spine hardening commit: added run_id/snapshot_id, improved logging, and replay exports.  
-- 2025-12-02 – Fixed broken local environment by restoring `config.py` and getting pytest to collect tests cleanly again.  
-- 2025-12-02 – Created TW_CANON.md and TW_LOG.md as the canonical truth layer for TradeWarrior.  
-- 2025-12-02 – Entered Phase 2 (GPT Policy + Risk Brain v1) and defined v1 contra

@@ -1,3 +1,6 @@
+import json
+import re
+
 from config import Config
 from execution_engine import execute_decision
 from schemas import RiskDecision
@@ -63,3 +66,76 @@ def test_execute_decision_calls_adapter_when_approved():
 
     assert adapter.called is True
     assert result["status"] == adapter_result["status"]
+
+
+def test_execution_logs_envelope_and_decision_for_approved_trade(caplog):
+    """Verify that execution logs contain both risk_envelope and risk_decision info."""
+    config = Config()
+    risk_envelope = {
+        "max_notional": 5000.0,
+        "max_leverage": 3.0,
+        "max_risk_per_trade_pct": 0.01,
+        "min_stop_distance_pct": 0.005,
+        "max_stop_distance_pct": 0.03,
+        "max_daily_loss_pct": 0.03,
+        "note": "baseline_vol;timing_normal",
+    }
+    state = {
+        "symbol": "BTCUSDT",
+        "run_id": "run-123",
+        "snapshot_id": "snap-001",
+        "last_gpt_decision": {"side": "long", "confidence": 0.9},
+        "last_risk_envelope": risk_envelope,
+    }
+    risk_decision = RiskDecision(
+        approved=True,
+        side="long",
+        position_size=1.0,
+        leverage=3.0,
+        stop_loss_price=99.5,
+        take_profit_price=105.5,
+        reason="test",
+    )
+    adapter_result = {
+        "status": "filled",
+        "fill_price": 101.0,
+        "avg_fill_price": 101.0,
+        "fee_paid": 0.1,
+        "realized_pnl": 1.2,
+    }
+    adapter = _DummyExecutionAdapter(adapter_result)
+
+    with caplog.at_level("INFO"):
+        result = execute_decision(risk_decision, config, state, adapter)
+
+    assert result["status"] == "filled"
+    
+    # Find the Execution event log
+    execution_log_found = False
+    for record in caplog.records:
+        if "Execution event:" in record.message:
+            execution_log_found = True
+            # Check that the log contains risk_envelope and risk_decision fields
+            assert "risk_envelope" in record.message or "'risk_envelope'" in record.message
+            assert "position_size" in record.message or "'position_size'" in record.message
+            assert "leverage" in record.message or "'leverage'" in record.message
+            assert "stop_loss_price" in record.message or "'stop_loss_price'" in record.message
+            assert "stop_distance_pct" in record.message or "'stop_distance_pct'" in record.message
+            # Check for envelope note
+            assert "note" in record.message or "'note'" in record.message
+            break
+    
+    assert execution_log_found, "Execution event log not found"
+    
+    # Also check execution trace log
+    trace_log_found = False
+    for record in caplog.records:
+        if "Execution trace:" in record.message:
+            trace_log_found = True
+            assert "risk_envelope" in record.message or "'risk_envelope'" in record.message
+            assert "position_size" in record.message or "'position_size'" in record.message
+            assert "leverage" in record.message or "'leverage'" in record.message
+            assert "stop_distance_pct" in record.message or "'stop_distance_pct'" in record.message
+            break
+    
+    assert trace_log_found, "Execution trace log not found"
