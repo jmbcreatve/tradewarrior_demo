@@ -25,13 +25,16 @@ DEFAULT_STATE: Dict[str, Any] = {
     "open_positions_summary": [],  # type: List[Dict[str, Any]]
 
     # Last GPT / risk context
-    "last_action": "flat",
-    "last_confidence": 0.0,
+    "last_decision": None,         # unified Decision object as dict
+    "last_envelope": None,         # last RiskEnvelope as dict
     "last_gpt_decision": None,      # raw dict from GptDecision.to_dict()
 
     # Snapshot tracking
     "last_snapshot": None,          # last snapshot dict processed
     "last_gpt_snapshot": None,      # snapshot at last GPT call
+    "last_gpt_call_ts": None,       # last GPT snapshot timestamp (same unit as snapshot["timestamp"])
+    "last_gpt_equity": 0.0,         # equity at last GPT call
+    "trades_since_last_gpt": 0,     # integer counter, will be refined later
 
     # GPT call throttling
     "gpt_call_timestamps": [],      # wall-time seconds
@@ -88,6 +91,10 @@ def _normalise_state(raw: Dict[str, Any], config: Config | None = None) -> Dict[
     state.update(raw or {})
     state["state_version"] = STATE_VERSION
 
+    # Remove legacy keys no longer used.
+    state.pop("last_action", None)
+    state.pop("last_confidence", None)
+
     # Symbol: always ensure we have one.
     if not state.get("symbol") and config is not None:
         state["symbol"] = config.symbol
@@ -123,16 +130,16 @@ def _normalise_state(raw: Dict[str, Any], config: Config | None = None) -> Dict[
     ops = state.get("open_positions_summary", DEFAULT_STATE["open_positions_summary"])
     state["open_positions_summary"] = ops if isinstance(ops, list) else []
 
-    # Last action / confidence
-    last_action = state.get("last_action", DEFAULT_STATE["last_action"])
-    if not isinstance(last_action, str) or not last_action:
-        last_action = DEFAULT_STATE["last_action"]
-    state["last_action"] = last_action
+    # Last decision / envelope: keep as dict or None
+    ld = state.get("last_decision")
+    if ld is not None and not isinstance(ld, dict):
+        ld = None
+    state["last_decision"] = ld
 
-    state["last_confidence"] = _coerce_float(
-        state.get("last_confidence", DEFAULT_STATE["last_confidence"]),
-        DEFAULT_STATE["last_confidence"],
-    )
+    le = state.get("last_envelope")
+    if le is not None and not isinstance(le, dict):
+        le = None
+    state["last_envelope"] = le
 
     # Last GPT decision: keep as dict or None
     lgd = state.get("last_gpt_decision")
@@ -145,6 +152,29 @@ def _normalise_state(raw: Dict[str, Any], config: Config | None = None) -> Dict[
         state["last_snapshot"] = None
     if state.get("last_gpt_snapshot") is not None and not isinstance(state["last_gpt_snapshot"], dict):
         state["last_gpt_snapshot"] = None
+
+    # GPT snapshot deltas
+    lgts = state.get("last_gpt_call_ts")
+    if lgts is None:
+        state["last_gpt_call_ts"] = None
+    else:
+        try:
+            state["last_gpt_call_ts"] = float(lgts)
+        except (TypeError, ValueError):
+            state["last_gpt_call_ts"] = None
+
+    state["last_gpt_equity"] = _coerce_float(
+        state.get("last_gpt_equity", DEFAULT_STATE["last_gpt_equity"]),
+        DEFAULT_STATE["last_gpt_equity"],
+    )
+
+    try:
+        trades_since = int(state.get("trades_since_last_gpt", DEFAULT_STATE["trades_since_last_gpt"]) or 0)
+    except (TypeError, ValueError):
+        trades_since = 0
+    if trades_since < 0:
+        trades_since = 0
+    state["trades_since_last_gpt"] = trades_since
 
     # GPT call timestamps
     state["gpt_call_timestamps"] = [

@@ -69,6 +69,11 @@ def _build_user_message(snapshot: Dict[str, Any]) -> str:
     return summary + json.dumps(snapshot, sort_keys=True)
 
 
+# GPT output schema expected from brain.txt:
+# - action: "long", "short", or "flat" (lowercase)
+# - size: float 0.0-1.0 representing relative trade size
+# - confidence: float 0.0-1.0 indicating conviction
+# - rationale: short human-readable reasoning for the choice
 def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
     """Call the GPT model defined in the config.
 

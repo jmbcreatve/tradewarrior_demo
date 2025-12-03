@@ -25,3 +25,5 @@ hl_*.env
 hl_*.json
 hl_keys.*
 twp3_testnet.env
+
+.venv/

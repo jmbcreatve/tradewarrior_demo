@@ -1,0 +1,9 @@
+# TradeWarrior runtime dependencies
+# Python 3.10+
+
+# OpenAI client for GPT integration (legacy v0.x API with ChatCompletion.create)
+openai==0.28.1
+
+# Hyperliquid SDK for market data and execution
+hyperliquid-python-sdk==0.21.0
+

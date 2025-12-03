@@ -1,15 +1,20 @@
 import json
+import os
 from dataclasses import dataclass, field
 from typing import List
 
 from enums import ExecutionMode
 
 
+def _default_backup_data_sources() -> List[str]:
+    return ["mock"]
+
+
 @dataclass
 class Config:
     """Top-level configuration for the TradeWarrior demo system.
 
-    Defaults are DEMO-safe: mock data, mock execution, paper trading enabled.
+    Defaults use Hyperliquid for real data, mock execution for safety.
     """
 
     symbol: str = "BTCUSDT"
@@ -24,9 +29,9 @@ class Config:
     # How long run_forever sleeps between iterations.
     loop_sleep_seconds: float = 3.0
 
-    # Adapters
-    primary_data_source_id: str = "mock"
-    backup_data_source_ids: List[str] = field(default_factory=list)
+    # Adapters - use Hyperliquid for real data, fallback to mock
+    primary_data_source_id: str = "hl"
+    backup_data_source_ids: List[str] = field(default_factory=_default_backup_data_sources)
     primary_execution_id: str = "mock"
     backup_execution_ids: List[str] = field(default_factory=list)
 
@@ -34,8 +39,8 @@ class Config:
     execution_mode: ExecutionMode = ExecutionMode.SIM
     paper_trading: bool = True
 
-    # GPT / brain config (model + token cap). Model can be overridden via env var.
-    gpt_model: str = "gpt-5-mini"
+    # GPT / brain config (model + token cap). Model from env var or default.
+    gpt_model: str = field(default_factory=lambda: os.getenv("TRADEWARRIOR_GPT_MODEL", "gpt-4o-mini"))
     gpt_max_tokens: int = 256
 
     # Paths

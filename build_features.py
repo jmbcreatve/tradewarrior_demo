@@ -347,6 +347,46 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
     except (TypeError, ValueError):
         equity = 0.0
 
+    last_gpt_ts = state.get("last_gpt_call_ts")
+    last_gpt_equity = state.get("last_gpt_equity")
+    last_gpt_snapshot = state.get("last_gpt_snapshot") or {}
+    prev_price = last_gpt_snapshot.get("price")
+
+    try:
+        now_ts = float(ts)
+    except (TypeError, ValueError):
+        now_ts = 0.0
+
+    if last_gpt_ts is None:
+        time_since = 0.0
+    else:
+        try:
+            time_since = max(0.0, now_ts - float(last_gpt_ts))
+        except (TypeError, ValueError):
+            time_since = 0.0
+
+    if prev_price not in (None, 0):
+        try:
+            price_change_pct = (price - float(prev_price)) / float(prev_price)
+        except (TypeError, ValueError, ZeroDivisionError):
+            price_change_pct = 0.0
+    else:
+        price_change_pct = 0.0
+
+    try:
+        equity_change = float(equity) - float(last_gpt_equity or 0.0)
+    except (TypeError, ValueError):
+        equity_change = 0.0
+
+    trades_since = int(state.get("trades_since_last_gpt", 0) or 0)
+
+    since_last_gpt = {
+        "time_since_last_gpt_sec": time_since,
+        "price_change_pct_since_last_gpt": price_change_pct,
+        "equity_change_since_last_gpt": equity_change,
+        "trades_since_last_gpt": trades_since,
+    }
+
     vol_enum = coerce_enum(vol_mode, VolatilityMode, VolatilityMode.UNKNOWN)
     timing_enum = coerce_enum(timing_state, TimingState, TimingState.UNKNOWN)
 
@@ -381,12 +421,14 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
         risk_context=risk_context,
         risk_envelope=risk_envelope.to_dict(),
         gpt_state_note=gpt_state_note,
+        since_last_gpt=since_last_gpt,
     )
 
     # Important: callers expect a dict, not the dataclass, so we normalise via
     # to_dict() + validate_snapshot_dict().
     snap_dict = snap.to_dict()
     snap_dict["risk_envelope"] = risk_envelope.to_dict()
+    snap_dict["since_last_gpt"] = since_last_gpt
     snap_dict = validate_snapshot_dict(snap_dict)
     snap_dict["run_id"] = run_id
     snap_dict["snapshot_id"] = snapshot_id

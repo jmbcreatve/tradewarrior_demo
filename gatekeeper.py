@@ -15,6 +15,7 @@ logger = get_logger(__name__)
 MAX_GPT_CALLS_PER_HOUR = 12          # hard cap per rolling hour
 MIN_SECONDS_BETWEEN_CALLS = 60       # min wall-clock spacing
 MIN_PRICE_MOVE_PCT = 0.001           # 0.1% move since last GPT snapshot
+MIN_ABS_PRICE_PCT = 0.0005           # 0.05% move since last GPT snapshot
 
 # "Interesting setup" definition
 MIN_SHAPE_SCORE = 0.3                # how strong microstructure must be
@@ -139,7 +140,7 @@ def should_call_gpt(
     snapshot: Dict[str, Any],
     prev_snapshot: Optional[Dict[str, Any]],
     state: Dict[str, Any],
-) -> bool:
+) -> Dict[str, Any]:
     """
     Decide whether to call GPT on this tick.
 
@@ -153,16 +154,24 @@ def should_call_gpt(
       - Appends to state["gpt_call_timestamps"].
       - Updates state["last_gpt_call_walltime"].
       - Sets state["last_gpt_snapshot"] to the current snapshot dict.
+    Returns a dict with should_call_gpt and reason fields for observability.
     """
     now_ts = float(snapshot.get("timestamp") or time.time())
+
+    slg = snapshot.get("since_last_gpt") or {}
+    time_since = float(slg.get("time_since_last_gpt_sec", 0.0) or 0.0)
+    price_change_pct = float(slg.get("price_change_pct_since_last_gpt", 0.0) or 0.0)
+    equity_change = float(slg.get("equity_change_since_last_gpt", 0.0) or 0.0)
+    trades_since = int(slg.get("trades_since_last_gpt", 0) or 0)
 
     core = _extract_core_features(snapshot)
     price = core["price"]
 
     # If timing state explicitly says AVOID, don't even consider GPT.
     if core["timing_state"] == TimingState.AVOID:
-        logger.info("Gatekeeper: timing_state=AVOID; skipping GPT.")
-        return False
+        reason = "timing_avoid"
+        logger.info("Gatekeeper: timing_state=AVOID; skipping GPT (reason=%s).", reason)
+        return {"should_call_gpt": False, "reason": reason}
 
     # Danger mode does *not* automatically wake GPT; it's a risk concept.
     # We still require a candidate setup or sufficient price movement.
@@ -172,20 +181,40 @@ def should_call_gpt(
     state["gpt_call_timestamps"] = call_timestamps
 
     if len(call_timestamps) >= MAX_GPT_CALLS_PER_HOUR:
+        reason = "max_calls"
         logger.info(
-            "Gatekeeper: max GPT calls/hour reached (%d); skipping GPT.",
+            "Gatekeeper: max GPT calls/hour reached (%d); skipping GPT (reason=%s).",
             MAX_GPT_CALLS_PER_HOUR,
+            reason,
         )
-        return False
+        return {"should_call_gpt": False, "reason": reason}
 
     last_call_ts = float(state.get("last_gpt_call_walltime") or 0.0)
     if last_call_ts and (now_ts - last_call_ts) < MIN_SECONDS_BETWEEN_CALLS:
+        reason = "min_spacing"
         logger.info(
-            "Gatekeeper: last GPT call %.1fs ago (< %ds); skipping GPT.",
+            "Gatekeeper: last GPT call %.1fs ago (< %ds); skipping GPT (reason=%s).",
             now_ts - last_call_ts,
             MIN_SECONDS_BETWEEN_CALLS,
+            reason,
         )
-        return False
+        return {"should_call_gpt": False, "reason": reason}
+
+    if (
+        time_since > 0.0
+        and trades_since == 0
+        and abs(price_change_pct) < MIN_ABS_PRICE_PCT
+    ):
+        reason = "no_price_change"
+        logger.info(
+            "Gatekeeper: since_last_gpt shows negligible change "
+            "(time=%.2fs, price_pct=%.5f, trades=%s); skipping GPT (reason=%s).",
+            time_since,
+            price_change_pct,
+            trades_since,
+            reason,
+        )
+        return {"should_call_gpt": False, "reason": reason}
 
     # --- Price move vs last GPT snapshot ------------------------------------
     last_gpt_snapshot = state.get("last_gpt_snapshot") or {}
@@ -203,12 +232,15 @@ def should_call_gpt(
     candidate = _is_candidate_setup(core, prev_snapshot)
 
     if not candidate and move_pct < move_threshold:
+        reason = "no_candidate_or_price_move"
         logger.info(
-            "Gatekeeper: no candidate setup and price move %.4f < %.4f; skipping GPT.",
+            "Gatekeeper: no candidate setup and price move %.4f < %.4f; "
+            "skipping GPT (reason=%s).",
             move_pct,
             move_threshold,
+            reason,
         )
-        return False
+        return {"should_call_gpt": False, "reason": reason}
 
     # --- Approve GPT call ----------------------------------------------------
     call_timestamps.append(now_ts)
@@ -216,14 +248,16 @@ def should_call_gpt(
     state["last_gpt_call_walltime"] = now_ts
     state["last_gpt_snapshot"] = snapshot
 
+    reason = "approved"
     logger.info(
         "Gatekeeper: candidate setup detected (candidate=%s, move_pct=%.4f, "
-        "range=%s, vol=%s, shape_bias=%s, shape_score=%.3f); calling GPT.",
+        "range=%s, vol=%s, shape_bias=%s, shape_score=%.3f); calling GPT (reason=%s).",
         candidate,
         move_pct,
         range_enum,
         core["vol_mode"],
         core["shape_bias"],
         core["shape_score"],
+        reason,
     )
-    return True
+    return {"should_call_gpt": True, "reason": reason}
