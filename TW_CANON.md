@@ -90,7 +90,7 @@ example_data_adapter.py – Example candle data.
 
 liqdata.py – Hyperliquid data (testnet/mainnet).
 
-liqexec.py – Hyperliquid testnet execution (market‑only, reads HL_TESTNET_PRIVATE_KEY from OS environment variables).
+liqexec.py – Hyperliquid testnet execution (market‑only, reads HL_TESTNET_PRIVATE_KEY from OS environment variables). Places protective stop/TP trigger orders (grouped OCO); fails safe by flattening/returning no_trade if protection cannot be installed.
 
 replay_engine.py – Backtest harness; **uses shared `run_spine_tick()` for live/replay parity**. Emits trades/equity + parity trace with full decision context.
 
@@ -100,7 +100,7 @@ logger_utils.py – Logging setup.
 
 safety_utils.py – Kill switch and circuit breaker checks.
 
-run_testnet.py – Hyperliquid testnet runner, continuous loop, daily P&L + safety logs, loss limits, kill switch. Reads secrets from OS environment variables (HL_TESTNET_PRIVATE_KEY, OPENAI_API_KEY). Optional .env file loading is a convenience helper only, not required.
+run_testnet.py – Hyperliquid testnet runner, continuous loop, daily P&L + safety logs, loss limits, kill switch. Reads secrets from OS environment variables (HL_TESTNET_PRIVATE_KEY, OPENAI_API_KEY). Optional .env file loading is a convenience helper only (explicit flag/twp3_testnet.env); no baked-in local_env.txt fallback.
 
 tests/ – Snapshot schema compliance, gatekeeper, GPT client, risk envelope/engine, execution, **replay parity**, adapters, safety utils, GPT safe mode. Tests are contracts.
 
@@ -142,11 +142,11 @@ market_session: "ASIA" | "EUROPE" | "US" | "OFF_HOURS"
 
 recent_price_path: dict with ret_1, ret_5, ret_15, impulse_state, lookback_bars
 
-risk_context: dict with equity, max_drawdown, open_positions_summary, last_action, last_confidence
+risk_context: dict with equity, max_drawdown, open_positions_summary, last_action, last_confidence (last_action/confidence come from the last risk/execution outcome, not raw GPT proposals)
 
 risk_envelope: dict (see 5.3)
 
-since_last_gpt: dict with time_since_last_gpt_sec, price_change_pct_since_last_gpt, equity_change_since_last_gpt, trades_since_last_gpt
+since_last_gpt: dict with time_since_last_gpt_sec, price_change_pct_since_last_gpt, equity_change_since_last_gpt, trades_since_last_gpt (state is refreshed after every GPT call; trades_since_last_gpt increments only on executed trades)
 
 gpt_state_note: str or None
 
@@ -198,6 +198,7 @@ max_daily_loss_pct: float
 note: str (e.g. "baseline_vol;timing_normal", "trim_for_vol;timing_cautious", "danger_mode")
 
 Risk engine must never exceed these limits even if config or GPT suggests more.
+Stop distances are clamped into [min_stop_distance_pct, max_stop_distance_pct] before deriving stop_loss/take_profit.
 Envelope + note must be logged for every trade decision.
 
 5.4 RiskDecision / Decision object (v1)

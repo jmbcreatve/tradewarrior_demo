@@ -337,7 +337,6 @@ Examples:
         _load_env_file_optional(args.env_file)
     # Also try loading common local env files for convenience (won't error if missing)
     _load_env_file_optional("twp3_testnet.env")
-    _load_env_file_optional("local_env.txt")
 
     # Validate OpenAI API key (fails fast if missing)
     try:
@@ -455,4 +454,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

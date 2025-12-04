@@ -52,7 +52,7 @@ def validate_openai_api_key() -> str:
     if not api_key or not api_key.strip():
         raise RuntimeError(
             "OPENAI_API_KEY environment variable is missing or empty. "
-            "Please set it in your environment or local_env.txt file. "
+            "Please set it in your environment before running. "
             "GPT calls require a valid OpenAI API key."
         )
     
