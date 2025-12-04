@@ -455,14 +455,25 @@ def _compute_timing_state(timestamp: float) -> tuple[str, str]:
     return session, enum_to_str(timing_enum)
 
 
-def _build_risk_context(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Compress account/position state into a small dict."""
+def _build_risk_context(state: Dict[str, Any], config: Config | None = None) -> Dict[str, Any]:
+    """
+    Compress account/position state into a small dict.
+    
+    Uses equity from state if available, otherwise falls back to config.initial_equity
+    (if config provided) or a safe default. This ensures risk_context reflects the
+    current equity correctly and does not silently assume a hardcoded starting equity.
+    """
     risk: Dict[str, Any] = {}
 
+    # Determine fallback equity: prefer config.initial_equity, then safe default
+    default_equity = 10_000.0
+    if config is not None:
+        default_equity = getattr(config, "initial_equity", default_equity)
+
     try:
-        risk["equity"] = float(state.get("equity", 10_000.0) or 10_000.0)
+        risk["equity"] = float(state.get("equity", default_equity) or default_equity)
     except (TypeError, ValueError):
-        risk["equity"] = 10_000.0
+        risk["equity"] = default_equity
 
     try:
         risk["max_drawdown"] = float(state.get("max_drawdown", 0.0) or 0.0)
@@ -532,7 +543,7 @@ def build_snapshot(config: Config, market_data: Dict[str, Any], state: Dict[str,
     danger_mode = _compute_danger_mode(vol_mode, recent_path)
     market_session, timing_state = _compute_timing_state(ts)
 
-    risk_context = _build_risk_context(state)
+    risk_context = _build_risk_context(state, config)
     try:
         equity = float(risk_context.get("equity", 0.0) or 0.0)
     except (TypeError, ValueError):

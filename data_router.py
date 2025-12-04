@@ -11,7 +11,7 @@ from adapters.mock_execution_adapter import MockExecutionAdapter
 from adapters.example_data_adapter import ExampleDataAdapter
 from adapters.example_execution_adapter import ExampleExecutionAdapter
 from adapters.liqdata import HyperliquidDataAdapter
-from adapters.liqexec import HyperliquidExecutionAdapter
+from adapters.liqexec import HyperliquidTestnetExecutionAdapter
 from logger_utils import get_logger
 
 logger = get_logger(__name__)
@@ -72,22 +72,22 @@ def build_execution_adapters(config: Config) -> Dict[str, BaseExecutionAdapter]:
     # Only add Hyperliquid execution adapter when explicitly in testnet mode
     if config.execution_mode == ExecutionMode.HL_TESTNET:
         try:
-            hl_exec_adapter = HyperliquidExecutionAdapter(use_testnet=True)
+            hl_exec_adapter = HyperliquidTestnetExecutionAdapter(use_testnet=True)
             # Only add if health check passes
             if hl_exec_adapter.health_check():
                 adapters["hl"] = hl_exec_adapter
                 logger.info(
-                    "ExecutionMode.HL_TESTNET selected; HyperliquidExecutionAdapter initialized "
+                    "ExecutionMode.HL_TESTNET selected; HyperliquidTestnetExecutionAdapter initialized "
                     "and health check passed. Real testnet orders will be placed."
                 )
             else:
                 logger.warning(
-                    "ExecutionMode.HL_TESTNET selected but HyperliquidExecutionAdapter health check failed. "
+                    "ExecutionMode.HL_TESTNET selected but HyperliquidTestnetExecutionAdapter health check failed. "
                     "Will fall back to mock/example adapters. Check credentials and network connectivity."
                 )
         except Exception as e:
             logger.error(
-                "Failed to initialize HyperliquidExecutionAdapter for testnet: %s. "
+                "Failed to initialize HyperliquidTestnetExecutionAdapter for testnet: %s. "
                 "Will fall back to mock/example adapters.",
                 e
             )

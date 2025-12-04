@@ -13,6 +13,7 @@ from enums import (
 from logger_utils import get_logger
 from risk_envelope import compute_risk_envelope, RiskEnvelope
 from schemas import GptDecision, RiskDecision
+from state_memory import is_gpt_safe_mode
 
 logger = get_logger(__name__)
 
@@ -121,11 +122,43 @@ def evaluate_risk(
     Risk engine: treat GPT as a proposal, enforce hard risk rules.
 
     Invariants:
+    - If GPT Safe Mode is active, always return FLAT (no trade).
     - If GPT says FLAT, we are FLAT (no trade).
     - If price/equity are invalid, no trade.
     - danger_mode or TimingState.AVOID → no trade.
     - Regime/timing can only REDUCE risk, never increase it.
     """
+    
+    # --- GPT Safe Mode check (highest priority safety clamp) -----------------
+    if is_gpt_safe_mode(state):
+        logger.warning(
+            "Risk: GPT SAFE MODE ACTIVE - forcing FLAT regardless of GPT decision. "
+            "Manual reset required to resume normal trading."
+        )
+        decision = RiskDecision(
+            approved=False,
+            side=Side.FLAT.value,
+            position_size=0.0,
+            leverage=0.0,
+            stop_loss_price=None,
+            take_profit_price=None,
+            reason="gpt_safe_mode_active",
+        )
+        # Log the event (no envelope since we're short-circuiting)
+        try:
+            event = {
+                "type": "risk_decision",
+                "symbol": snapshot.get("symbol"),
+                "timestamp": snapshot.get("timestamp"),
+                "gpt_safe_mode": True,
+                "approved": False,
+                "side": "flat",
+                "reason": "gpt_safe_mode_active",
+            }
+            logger.info("RiskDecision event (SAFE MODE): %s", event)
+        except Exception:
+            pass
+        return decision
 
     # --- Normalise GPT decision ----------------------------------------------
     gpt = _norm_gpt_decision(gpt_decision)

@@ -11,12 +11,13 @@ Usage:
     python run_testnet.py --dry-run    # Compute decisions but skip execution
     python run_testnet.py --reset      # Start with fresh state
 
-Required environment:
-    - twp3_testnet.env file with:
-        HL_TESTNET_PRIVATE_KEY=0x...
-    
-    - (Optional) local_env.txt or environment with:
-        OPENAI_API_KEY=sk-...
+Required environment variables (OS environment, not .env files):
+    - HL_TESTNET_PRIVATE_KEY=0x...     # Hyperliquid testnet private key
+    - OPENAI_API_KEY=sk-...            # OpenAI API key for GPT calls
+
+Optional convenience: If you want to use .env files for local development,
+you can use the --env-file flag, but this is NOT required. All secrets
+should ultimately come from OS environment variables.
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ from pprint import pprint
 # Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import load_testnet_config, _load_env_file
+from config import load_testnet_config
 from engine import _run_tick, _initialize_daily_tracking
-from state_memory import load_state, reset_state, save_state
+from state_memory import load_state, reset_state, save_state, is_gpt_safe_mode, clear_gpt_safe_mode
 from risk_envelope import compute_risk_envelope
 from enums import VolatilityMode, TimingState
 from safety_utils import KILL_SWITCH_FILE, check_trading_halted
@@ -40,6 +41,39 @@ from gpt_client import validate_openai_api_key
 import time
 
 logger = get_logger(__name__)
+
+
+# ===========================================================================
+# Optional .env file loading (for local convenience only)
+# ===========================================================================
+
+def _load_env_file_optional(path: str) -> None:
+    """
+    Optionally load environment variables from a file (simple .env parser).
+    
+    This is a convenience helper for local development. It does NOT override
+    existing OS environment variables. The canonical source of secrets is
+    the OS environment, not .env files.
+    
+    This function is NOT part of config.py to keep config.py environment-agnostic.
+    """
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, _, value = line.partition("=")
+                    key = key.strip()
+                    value = value.strip().strip('"').strip("'")
+                    if key and key not in os.environ:  # Don't override existing env vars
+                        os.environ[key] = value
+        logger.info(f"Loaded environment variables from {path} (if any)")
+    except Exception as e:
+        logger.warning(f"Failed to load env file {path}: {e}")
 
 
 # ===========================================================================
@@ -112,7 +146,7 @@ def _log_config_summary(cfg, state) -> None:
 
 
 def _log_periodic_status(cfg, state) -> None:
-    """Log periodic status: daily P&L, safety status, and trading state."""
+    """Log periodic status: daily P&L, safety status, GPT safe mode, and trading state."""
     equity = state.get("equity", cfg.initial_equity)
     daily_pnl = state.get("daily_pnl", 0.0)
     daily_start_equity = state.get("daily_start_equity")
@@ -129,6 +163,10 @@ def _log_periodic_status(cfg, state) -> None:
     
     # Check safety status
     is_halted, halt_reason = check_trading_halted(state)
+    
+    # Check GPT safe mode
+    gpt_safe_mode = is_gpt_safe_mode(state)
+    gpt_error_count = state.get("gpt_error_count", 0)
     
     logger.info("")
     logger.info("=" * 60)
@@ -151,6 +189,15 @@ def _log_periodic_status(cfg, state) -> None:
         logger.warning(f"  ⚠️  TRADING HALTED: {halt_reason}")
     else:
         logger.info("  ✓ Trading active (no safety triggers)")
+    
+    # GPT safe mode status
+    if gpt_safe_mode:
+        logger.warning(f"  🚨 GPT SAFE MODE ACTIVE: All GPT calls skipped, forcing FLAT. Manual reset required.")
+    else:
+        if gpt_error_count > 0:
+            logger.info(f"  ⚡ GPT error count: {gpt_error_count} (threshold: 3)")
+        else:
+            logger.info("  ✓ GPT health: OK (error count: 0)")
     
     logger.info("=" * 60)
     logger.info("")
@@ -264,8 +311,8 @@ Examples:
     parser.add_argument(
         "--env-file",
         type=str,
-        default="twp3_testnet.env",
-        help="Path to testnet environment file (default: twp3_testnet.env)",
+        default=None,
+        help="Optional: Path to .env file for local convenience (secrets should come from OS env vars)",
     )
     parser.add_argument(
         "--sleep",
@@ -273,14 +320,24 @@ Examples:
         default=None,
         help="Override loop sleep interval (seconds between ticks)",
     )
+    parser.add_argument(
+        "--clear-gpt-safe-mode",
+        action="store_true",
+        help="Clear GPT safe mode before starting (use after verifying GPT is healthy)",
+    )
 
     args = parser.parse_args()
 
     # Print testnet banner
     print(TESTNET_BANNER)
 
-    # Load OpenAI key from local_env.txt if present
-    _load_env_file("local_env.txt")
+    # Optional: Load .env file for local convenience (if provided)
+    # This is NOT required - all secrets should come from OS environment variables
+    if args.env_file:
+        _load_env_file_optional(args.env_file)
+    # Also try loading common local env files for convenience (won't error if missing)
+    _load_env_file_optional("twp3_testnet.env")
+    _load_env_file_optional("local_env.txt")
 
     # Validate OpenAI API key (fails fast if missing)
     try:
@@ -288,21 +345,20 @@ Examples:
     except RuntimeError as e:
         logger.error(f"❌ {e}")
         logger.error(
-            "Please set OPENAI_API_KEY in local_env.txt or environment before running testnet."
+            "Please set OPENAI_API_KEY as an OS environment variable before running testnet."
         )
         sys.exit(1)
 
     # Load testnet configuration
+    # Note: load_testnet_config() expects secrets from OS environment, not .env files
     try:
-        cfg = load_testnet_config(
-            env_file=args.env_file,
-            equity=args.equity,
-        )
+        cfg = load_testnet_config(equity=args.equity)
     except ValueError as e:
         logger.error(f"❌ Configuration error: {e}")
         logger.error(
-            f"Please ensure {args.env_file} exists with required credentials:\n"
-            "  HL_TESTNET_PRIVATE_KEY=0x..."
+            "Please set required environment variables as OS environment variables:\n"
+            "  export HL_TESTNET_PRIVATE_KEY=0x...\n"
+            "  export OPENAI_API_KEY=sk-..."
         )
         sys.exit(1)
 
@@ -316,6 +372,15 @@ Examples:
         state = reset_state(cfg)
     else:
         state = load_state(cfg)
+
+    # Handle --clear-gpt-safe-mode flag
+    if args.clear_gpt_safe_mode:
+        if is_gpt_safe_mode(state):
+            clear_gpt_safe_mode(state)
+            save_state(state, cfg)
+            logger.info("✅ GPT safe mode cleared (--clear-gpt-safe-mode flag)")
+        else:
+            logger.info("ℹ️  GPT safe mode was not active (--clear-gpt-safe-mode flag ignored)")
 
     logger.info(
         f"💰 Starting equity: ${state.get('equity', cfg.initial_equity):,.2f}"
@@ -333,6 +398,14 @@ Examples:
     wallet_key = os.getenv('HL_TESTNET_PRIVATE_KEY', 'NOT SET')
     logger.info(f"   ✓ Private key: {'SET' if wallet_key != 'NOT SET' else 'NOT SET'} ({'***' + wallet_key[-4:] if len(wallet_key) > 4 else 'N/A'})")
     logger.info(f"   ✓ Kill switch: {KILL_SWITCH_FILE} (create this file to halt trading)")
+    
+    # GPT Safe Mode status
+    gpt_safe_mode = is_gpt_safe_mode(state)
+    gpt_error_count = state.get("gpt_error_count", 0)
+    if gpt_safe_mode:
+        logger.warning(f"   🚨 GPT SAFE MODE: ACTIVE (error_count={gpt_error_count}) - manual reset required")
+    else:
+        logger.info(f"   ✓ GPT safe mode: Inactive (error_count={gpt_error_count})")
     
     # Show daily P&L status
     daily_pnl = state.get("daily_pnl", 0.0)

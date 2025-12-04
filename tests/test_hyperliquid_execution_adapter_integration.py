@@ -1,8 +1,7 @@
 """Integration tests for HyperliquidExecutionAdapter with real testnet API.
 
 These tests require:
-- HL_TESTNET_MAIN_WALLET_ADDRESS environment variable
-- HL_TESTNET_API_WALLET_PRIVATE_KEY environment variable
+- HL_TESTNET_PRIVATE_KEY environment variable
 - Network connectivity to Hyperliquid testnet
 
 To run these tests:
@@ -28,11 +27,10 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def testnet_adapter():
     """Create a testnet adapter if credentials are available."""
-    wallet = os.getenv("HL_TESTNET_MAIN_WALLET_ADDRESS")
-    key = os.getenv("HL_TESTNET_API_WALLET_PRIVATE_KEY")
+    key = os.getenv("HL_TESTNET_PRIVATE_KEY")
     
-    if not wallet or not key:
-        pytest.skip("Missing HL_TESTNET_MAIN_WALLET_ADDRESS or HL_TESTNET_API_WALLET_PRIVATE_KEY")
+    if not key:
+        pytest.skip("Missing HL_TESTNET_PRIVATE_KEY")
     
     adapter = HyperliquidExecutionAdapter(use_testnet=True)
     

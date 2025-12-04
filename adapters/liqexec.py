@@ -13,6 +13,7 @@ try:
     from hyperliquid.exchange import Exchange
     from hyperliquid.info import Info
     from hyperliquid.utils import constants
+    from eth_account import Account
     HL_SDK_AVAILABLE = True
 except ImportError:
     HL_SDK_AVAILABLE = False
@@ -37,7 +38,7 @@ def _normalize_symbol(symbol: str) -> str:
     return SYMBOL_MAP.get(symbol.upper(), symbol.upper().replace("USDT", "").replace("-USD", ""))
 
 
-class HyperliquidExecutionAdapter(BaseExecutionAdapter):
+class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
     """
     Hyperliquid testnet execution adapter for placing real testnet orders.
     
@@ -46,7 +47,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
     - Places market orders only
     - Respects RiskDecision sizing, leverage, and stop/take levels
     - On errors, logs clearly and returns "no_trade" result instead of throwing
-    - Requires HL_TESTNET_MAIN_WALLET_ADDRESS and HL_TESTNET_API_WALLET_PRIVATE_KEY env vars
+    - Requires HL_TESTNET_PRIVATE_KEY env var
     """
 
     def __init__(self, use_testnet: bool = True, base_url: Optional[str] = None) -> None:
@@ -57,17 +58,19 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
             use_testnet: If True, use testnet API. Default True for safety.
             base_url: Optional override for API URL (for testing)
         """
+        self._exchange = None
+        self._info = None
+        self._account = None
+
         if not HL_SDK_AVAILABLE:
             logger.error("Hyperliquid SDK not available. Install with: pip install hyperliquid-python-sdk")
-            self._exchange = None
-            self._info = None
             self._use_testnet = use_testnet
             return
         
         # Safety: only allow testnet by default
         if not use_testnet:
-            logger.error("HyperliquidExecutionAdapter: use_testnet=False is not allowed for safety. Use testnet only.")
-            raise ValueError("HyperliquidExecutionAdapter only supports testnet mode")
+            logger.error("HyperliquidTestnetExecutionAdapter: use_testnet=False is not allowed for safety. Use testnet only.")
+            raise ValueError("HyperliquidTestnetExecutionAdapter only supports testnet mode")
         
         self._use_testnet = True
         
@@ -77,29 +80,32 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         else:
             api_url = constants.TESTNET_API_URL
         
-        # Read credentials from environment
-        wallet_address = os.getenv("HL_TESTNET_MAIN_WALLET_ADDRESS")
-        private_key = os.getenv("HL_TESTNET_API_WALLET_PRIVATE_KEY")
+        # Read private key from environment
+        private_key = os.getenv("HL_TESTNET_PRIVATE_KEY")
         
-        if not wallet_address or not private_key:
+        if not private_key:
             logger.error(
-                "HyperliquidExecutionAdapter: Missing required env vars. "
-                "Need HL_TESTNET_MAIN_WALLET_ADDRESS and HL_TESTNET_API_WALLET_PRIVATE_KEY"
+                "HyperliquidTestnetExecutionAdapter: Missing required env var. "
+                "Need HL_TESTNET_PRIVATE_KEY"
             )
             self._exchange = None
             self._info = None
+            self._account = None
             return
         
-        # Initialize Exchange and Info clients
+        # Initialize Wallet, Exchange, and Info clients
         try:
-            # Exchange uses wallet address and private key for signing
-            self._exchange = Exchange(wallet_address, api_url, private_key)
+            # Create account from private key using eth_account
+            self._account = Account.from_key(private_key)
+            # Exchange uses account and base_url
+            self._exchange = Exchange(self._account, base_url=api_url)
             self._info = Info(api_url, skip_ws=True)
-            logger.info(f"HyperliquidExecutionAdapter initialized (testnet=True, url={api_url})")
+            logger.info(f"HyperliquidTestnetExecutionAdapter initialized (testnet=True, url={api_url})")
         except Exception as e:
             logger.error(f"Failed to initialize Hyperliquid clients: {e}")
             self._exchange = None
             self._info = None
+            self._account = None
 
     # ------------------------------------------------------------------ #
     # BaseExecutionAdapter interface                                     #
@@ -113,12 +119,16 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         - symbol, side, size, entry_price, leverage, etc.
         """
         if self._info is None:
-            logger.warning("HyperliquidExecutionAdapter: SDK not available, returning empty positions")
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not available, returning empty positions")
             return []
         
         try:
             hl_symbol = _normalize_symbol(symbol)
-            user_state = self._info.user_state(self._exchange.wallet_address)
+            account_address = getattr(self._account, "address", None)
+            if not account_address:
+                logger.warning("HyperliquidTestnetExecutionAdapter: Account not available, returning empty positions")
+                return []
+            user_state = self._info.user_state(account_address)
             
             if not user_state or "assetPositions" not in user_state:
                 return []
@@ -182,14 +192,14 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         
         # Safety checks
         if self._exchange is None or self._info is None:
-            logger.error("HyperliquidExecutionAdapter: SDK not initialized, cannot place order")
+            logger.error("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot place order")
             result["reason"] = "sdk_not_initialized"
             return result
         
         # Only market orders supported
         if order_type != "market":
             logger.warning(
-                "HyperliquidExecutionAdapter: Only market orders supported, got order_type=%s. "
+                "HyperliquidTestnetExecutionAdapter: Only market orders supported, got order_type=%s. "
                 "Refusing order.",
                 order_type
             )
@@ -199,7 +209,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         # Validate side
         side_norm = str(side).lower()
         if side_norm not in {"long", "short"}:
-            logger.warning("HyperliquidExecutionAdapter: Invalid side %s, refusing order", side)
+            logger.warning("HyperliquidTestnetExecutionAdapter: Invalid side %s, refusing order", side)
             result["reason"] = "invalid_side"
             return result
         
@@ -207,11 +217,11 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         try:
             trade_size = float(size)
             if trade_size <= 0.0:
-                logger.warning("HyperliquidExecutionAdapter: Non-positive size %s, refusing order", size)
+                logger.warning("HyperliquidTestnetExecutionAdapter: Non-positive size %s, refusing order", size)
                 result["reason"] = "invalid_size"
                 return result
         except (TypeError, ValueError) as e:
-            logger.warning("HyperliquidExecutionAdapter: Invalid size %s: %s", size, e)
+            logger.warning("HyperliquidTestnetExecutionAdapter: Invalid size %s: %s", size, e)
             result["reason"] = "invalid_size"
             return result
         
@@ -225,12 +235,12 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
                     lev_result = self._exchange.update_leverage(leverage, hl_symbol)
                     if not lev_result.get("status") == "ok":
                         logger.warning(
-                            "HyperliquidExecutionAdapter: Failed to set leverage %s: %s",
+                            "HyperliquidTestnetExecutionAdapter: Failed to set leverage %s: %s",
                             leverage, lev_result
                         )
                         # Continue anyway - leverage might already be set
                 except Exception as e:
-                    logger.warning("HyperliquidExecutionAdapter: Error setting leverage: %s", e)
+                    logger.warning("HyperliquidTestnetExecutionAdapter: Error setting leverage: %s", e)
                     # Continue anyway
             
             # Build order specification
@@ -261,7 +271,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
                     pass  # Use default error message
                 
                 logger.error(
-                    "HyperliquidExecutionAdapter: Order failed for %s %s size=%.6f: %s",
+                    "HyperliquidTestnetExecutionAdapter: Order failed for %s %s size=%.6f: %s",
                     symbol, side, trade_size, error_msg
                 )
                 result["reason"] = f"order_rejected: {error_msg}"
@@ -272,7 +282,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
             statuses = order_data.get("statuses", [])
             
             if not statuses:
-                logger.error("HyperliquidExecutionAdapter: No status in order response")
+                logger.error("HyperliquidTestnetExecutionAdapter: No status in order response")
                 result["reason"] = "no_status_in_response"
                 return result
             
@@ -300,7 +310,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
                 })
                 
                 logger.info(
-                    "HyperliquidExecutionAdapter: Order filled %s %s size=%.6f @ %.2f",
+                    "HyperliquidTestnetExecutionAdapter: Order filled %s %s size=%.6f @ %.2f",
                     symbol, side, trade_size, avg_fill_price
                 )
                 
@@ -308,7 +318,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
                 # For now, we log them but don't automatically place them
                 if stop_loss is not None or take_profit is not None:
                     logger.info(
-                        "HyperliquidExecutionAdapter: Note - stop_loss=%s and take_profit=%s "
+                        "HyperliquidTestnetExecutionAdapter: Note - stop_loss=%s and take_profit=%s "
                         "are logged but not automatically placed as separate orders",
                         stop_loss, take_profit
                     )
@@ -317,7 +327,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
                 # Order is resting (limit order, not filled immediately)
                 resting_info = filled_status["resting"]
                 logger.warning(
-                    "HyperliquidExecutionAdapter: Order is resting (not filled): %s",
+                    "HyperliquidTestnetExecutionAdapter: Order is resting (not filled): %s",
                     resting_info
                 )
                 result.update({
@@ -326,7 +336,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
                     "reason": "order_resting",
                 })
             else:
-                logger.error("HyperliquidExecutionAdapter: Unexpected order status: %s", filled_status)
+                logger.error("HyperliquidTestnetExecutionAdapter: Unexpected order status: %s", filled_status)
                 result["reason"] = "unexpected_status"
                 return result
             
@@ -334,7 +344,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
             
         except Exception as e:
             logger.error(
-                "HyperliquidExecutionAdapter: Exception placing order for %s %s size=%.6f: %s",
+                "HyperliquidTestnetExecutionAdapter: Exception placing order for %s %s size=%.6f: %s",
                 symbol, side, size, e,
                 exc_info=True
             )
@@ -346,7 +356,7 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         Cancel all open orders for a symbol on Hyperliquid testnet.
         """
         if self._exchange is None:
-            logger.warning("HyperliquidExecutionAdapter: SDK not initialized, cannot cancel orders")
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot cancel orders")
             return
         
         try:
@@ -354,15 +364,15 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
             result = self._exchange.cancel(hl_symbol)
             
             if result.get("status") == "ok":
-                logger.info("HyperliquidExecutionAdapter: Cancelled all orders for %s", symbol)
+                logger.info("HyperliquidTestnetExecutionAdapter: Cancelled all orders for %s", symbol)
             else:
                 logger.warning(
-                    "HyperliquidExecutionAdapter: Failed to cancel orders for %s: %s",
+                    "HyperliquidTestnetExecutionAdapter: Failed to cancel orders for %s: %s",
                     symbol, result
                 )
         except Exception as e:
             logger.error(
-                "HyperliquidExecutionAdapter: Exception cancelling orders for %s: %s",
+                "HyperliquidTestnetExecutionAdapter: Exception cancelling orders for %s: %s",
                 symbol, e,
                 exc_info=True
             )
@@ -384,8 +394,11 @@ class HyperliquidExecutionAdapter(BaseExecutionAdapter):
         
         try:
             # Try to fetch user state as a health check
-            user_state = self._info.user_state(self._exchange.wallet_address)
+            if self._account is None:
+                return False
+            account_address = self._account.address
+            user_state = self._info.user_state(account_address)
             return user_state is not None
         except Exception as e:
-            logger.warning(f"HyperliquidExecutionAdapter health check failed: {e}")
+            logger.warning(f"HyperliquidTestnetExecutionAdapter health check failed: {e}")
             return False

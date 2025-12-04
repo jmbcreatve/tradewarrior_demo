@@ -1,27 +1,29 @@
-"""Unit tests for HyperliquidExecutionAdapter with mocked Hyperliquid SDK."""
+"""Unit tests for HyperliquidTestnetExecutionAdapter with mocked Hyperliquid SDK."""
 
 import os
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from adapters.liqexec import HyperliquidExecutionAdapter
+from adapters.liqexec import HyperliquidTestnetExecutionAdapter
 
 
 class TestHyperliquidExecutionAdapter:
-    """Test HyperliquidExecutionAdapter with mocked SDK."""
+    """Test HyperliquidTestnetExecutionAdapter with mocked SDK."""
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_init_success(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_init_success(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test successful initialization with valid credentials."""
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
         mock_info_class.return_value = mock_info
@@ -31,18 +33,21 @@ class TestHyperliquidExecutionAdapter:
         
         assert adapter._exchange is not None
         assert adapter._info is not None
+        assert adapter._wallet is not None
         assert adapter._use_testnet is True
-        mock_exchange_class.assert_called_once()
+        mock_wallet_class.assert_called_once_with("0xabcdef1234567890")
+        mock_exchange_class.assert_called_once_with(mock_wallet, base_url="https://api.hyperliquid-testnet.xyz")
         mock_info_class.assert_called_once()
 
     @patch.dict(os.environ, {}, clear=True)
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     def test_init_missing_credentials(self):
-        """Test initialization fails gracefully when credentials are missing."""
+        """Test initialization fails gracefully when HL_TESTNET_PRIVATE_KEY is missing."""
         adapter = HyperliquidExecutionAdapter(use_testnet=True)
         
         assert adapter._exchange is None
         assert adapter._info is None
+        assert adapter._wallet is None
 
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", False)
     def test_init_sdk_not_available(self):
@@ -51,6 +56,7 @@ class TestHyperliquidExecutionAdapter:
         
         assert adapter._exchange is None
         assert adapter._info is None
+        assert adapter._wallet is None
 
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     def test_init_rejects_non_testnet(self):
@@ -59,16 +65,18 @@ class TestHyperliquidExecutionAdapter:
             HyperliquidExecutionAdapter(use_testnet=False)
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_health_check_success(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_health_check_success(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test health check returns True when user state can be fetched."""
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
         mock_info.user_state.return_value = {"assetPositions": []}
@@ -80,17 +88,18 @@ class TestHyperliquidExecutionAdapter:
         mock_info.user_state.assert_called_once_with("0x1234567890abcdef")
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_health_check_failure(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_health_check_failure(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test health check returns False on error."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
         mock_info.user_state.side_effect = Exception("Connection error")
@@ -101,17 +110,18 @@ class TestHyperliquidExecutionAdapter:
         assert adapter.health_check() is False
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_place_order_market_success(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_place_order_market_success(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test successful market order placement."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange.update_leverage.return_value = {"status": "ok"}
         mock_exchange.market_order.return_value = {
             "status": "ok",
@@ -152,17 +162,18 @@ class TestHyperliquidExecutionAdapter:
         )
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_place_order_rejects_non_market(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_place_order_rejects_non_market(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test that non-market orders are rejected."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
         mock_info_class.return_value = mock_info
@@ -181,17 +192,18 @@ class TestHyperliquidExecutionAdapter:
         mock_exchange.market_order.assert_not_called()
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_place_order_rejects_invalid_side(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_place_order_rejects_invalid_side(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test that invalid side is rejected."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
         mock_info_class.return_value = mock_info
@@ -208,17 +220,18 @@ class TestHyperliquidExecutionAdapter:
         assert result["reason"] == "invalid_side"
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_place_order_handles_api_error(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_place_order_handles_api_error(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test that API errors are handled gracefully."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange.market_order.return_value = {
             "status": "err",
             "response": {
@@ -247,17 +260,18 @@ class TestHyperliquidExecutionAdapter:
         assert "order_rejected" in result["reason"]
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_place_order_handles_exception(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_place_order_handles_exception(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test that exceptions are caught and return no_trade."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange.market_order.side_effect = Exception("Network error")
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
@@ -275,17 +289,18 @@ class TestHyperliquidExecutionAdapter:
         assert "exception" in result["reason"]
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_get_open_positions(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_get_open_positions(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test fetching open positions."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
         mock_info.user_state.return_value = {
@@ -313,17 +328,18 @@ class TestHyperliquidExecutionAdapter:
         assert positions[0]["leverage"] == 2.0
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_cancel_all_orders(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_cancel_all_orders(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test cancelling all orders."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange.cancel.return_value = {"status": "ok"}
         mock_exchange_class.return_value = mock_exchange
         mock_info = MagicMock()
@@ -336,17 +352,18 @@ class TestHyperliquidExecutionAdapter:
         mock_exchange.cancel.assert_called_once_with("BTC")
 
     @patch.dict(os.environ, {
-        "HL_TESTNET_MAIN_WALLET_ADDRESS": "0x1234567890abcdef",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY": "0xabcdef1234567890",
+        "HL_TESTNET_PRIVATE_KEY": "0xabcdef1234567890",
     })
     @patch("adapters.liqexec.HL_SDK_AVAILABLE", True)
     @patch("adapters.liqexec.Exchange")
     @patch("adapters.liqexec.Info")
-    def test_symbol_normalization(self, mock_info_class, mock_exchange_class):
+    @patch("adapters.liqexec.Wallet")
+    def test_symbol_normalization(self, mock_wallet_class, mock_info_class, mock_exchange_class):
         """Test that various symbol formats are normalized correctly."""
-        mock_constants.TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+        mock_wallet = MagicMock()
+        mock_wallet.address = "0x1234567890abcdef"
+        mock_wallet_class.return_value = mock_wallet
         mock_exchange = MagicMock()
-        mock_exchange.wallet_address = "0x1234567890abcdef"
         mock_exchange.market_order.return_value = {
             "status": "ok",
             "response": {

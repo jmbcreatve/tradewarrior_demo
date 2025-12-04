@@ -10,23 +10,6 @@ def _default_backup_data_sources() -> List[str]:
     return ["mock"]
 
 
-def _load_env_file(path: str) -> None:
-    """Load environment variables from a file (simple .env parser)."""
-    if not os.path.exists(path):
-        return
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:  # Don't override existing env vars
-                    os.environ[key] = value
-
-
 def _str_to_bool(val: str) -> bool:
     """Convert string to boolean."""
     return val.lower() in ("true", "1", "yes", "on")
@@ -36,23 +19,33 @@ def _str_to_bool(val: str) -> bool:
 class Config:
     """Top-level configuration for the TradeWarrior demo system.
 
+    This is the single canonical description of runtime configuration including:
+    - Risk caps (risk_per_trade, max_leverage, etc.)
+    - Testnet mode settings (is_testnet, execution_mode)
+    - Initial equity for position sizing and state initialization
+    - Data/execution adapter selection
+    - Loop timing and paths
+
+    All secrets (API keys, private keys) must come from OS environment variables,
+    not from .env files. This class is environment-agnostic and does not read
+    environment variables directly (except for optional GPT model override).
+
     Defaults use Hyperliquid for real data, mock execution for safety.
     """
 
     symbol: str = "BTCUSDT"
     timeframe: str = "1m"
 
-    # Risk
-    risk_per_trade: float = 0.005
-    max_leverage: float = 3.0
-    max_leverage_10x_mode: float = 10.0
+    # Risk caps (downward-only limits enforced by risk_engine.py)
+    risk_per_trade: float = 0.005  # Risk per trade as fraction of equity (0.5% default)
+    max_leverage: float = 3.0  # Maximum leverage multiplier
+    max_leverage_10x_mode: float = 10.0  # Maximum leverage in aggressive mode
 
     # Account / equity
-    initial_equity: float = 10_000.0  # Starting equity for position sizing
+    initial_equity: float = 10_000.0  # Starting equity for position sizing and state initialization
 
     # Loop / orchestration
-    # How long run_forever sleeps between iterations.
-    loop_sleep_seconds: float = 3.0
+    loop_sleep_seconds: float = 3.0  # How long run_forever sleeps between iterations
 
     # Adapters - use Hyperliquid for real data, fallback to mock
     primary_data_source_id: str = "hl"
@@ -60,27 +53,26 @@ class Config:
     primary_execution_id: str = "mock"
     backup_execution_ids: List[str] = field(default_factory=list)
 
-    # Modes
-    execution_mode: ExecutionMode = ExecutionMode.SIM
-    paper_trading: bool = True
-
-    # Testnet configuration
-    is_testnet: bool = False  # Master testnet flag - affects API endpoints
+    # Execution mode and testnet settings
+    execution_mode: ExecutionMode = ExecutionMode.SIM  # Execution mode (SIM, HL_TESTNET, etc.)
+    paper_trading: bool = True  # Paper trading flag (legacy, may be redundant with execution_mode)
+    is_testnet: bool = False  # Master testnet flag - affects API endpoints in adapters
 
     # GPT / brain config (model + token cap). Model from env var or default.
     gpt_model: str = field(default_factory=lambda: os.getenv("TRADEWARRIOR_GPT_MODEL", "gpt-4o-mini"))
     gpt_max_tokens: int = 256
 
     # Paths
-    state_file: str = "state.json"
-    log_dir: str = "logs"
+    state_file: str = "state.json"  # Path to state JSON file
+    log_dir: str = "logs"  # Directory for log files
 
 
 def load_config(path: str | None = None) -> Config:
     """Return a Config instance with demo-safe defaults or load from a file.
 
-    This function MUST NOT require environment variables. All defaults are safe
-    to run in a local or demo environment with no API keys.
+    This function is environment-agnostic and MUST NOT read environment variables
+    or .env files. All defaults are safe to run in a local or demo environment
+    with no API keys. Secrets must be provided via OS environment variables at runtime.
     """
     if path is None:
         return Config()
@@ -97,33 +89,31 @@ def load_config(path: str | None = None) -> Config:
     return Config(**payload)
 
 
-def load_testnet_config(
-    env_file: str = "twp3_testnet.env",
-    equity: float = 1000.0,
-) -> Config:
+def load_testnet_config(equity: float = 1000.0) -> Config:
     """
     Create a Config specifically configured for Hyperliquid testnet trading.
     
+    This function does NOT load .env files. It expects required secrets to be
+    available as OS environment variables (e.g., HL_TESTNET_PRIVATE_KEY).
+    
     Args:
-        env_file: Path to env file with HL_TESTNET_* credentials
         equity: Initial equity for position sizing (default $1000 for testnet)
     
     Returns:
         Config instance configured for testnet with conservative position sizing
-    """
-    # Load environment variables from testnet env file
-    _load_env_file(env_file)
     
-    # Validate required env vars are present
+    Raises:
+        ValueError: If required environment variables are missing
+    """
+    # Validate required env vars are present (from OS environment, not .env file)
     required_env_vars = [
-        "HL_TESTNET_MAIN_WALLET_ADDRESS",
-        "HL_TESTNET_API_WALLET_PRIVATE_KEY",
+        "HL_TESTNET_PRIVATE_KEY",
     ]
     missing = [v for v in required_env_vars if not os.getenv(v)]
     if missing:
         raise ValueError(
             f"Missing required testnet env vars: {missing}. "
-            f"Please set them in {env_file} or environment."
+            f"Please set them as OS environment variables (e.g., export HL_TESTNET_PRIVATE_KEY=0x...)."
         )
     
     return Config(

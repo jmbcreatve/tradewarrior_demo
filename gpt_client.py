@@ -1,6 +1,7 @@
 import json
 import os
-from typing import Dict, Any
+import time
+from typing import Dict, Any, Optional
 
 from config import Config
 from schemas import GptDecision
@@ -9,6 +10,57 @@ from logger_utils import get_logger
 logger = get_logger(__name__)
 
 _BRAIN_PROMPT_CACHE: str | None = None
+_API_KEY_VALIDATED: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Safe Mode Decision Factory
+# ---------------------------------------------------------------------------
+
+def create_safe_mode_decision(reason: str = "gpt_safe_mode_active") -> GptDecision:
+    """
+    Create a flat GptDecision when GPT safe mode is active.
+    
+    This is the canonical "do nothing" decision used when:
+    - GPT safe mode is active
+    - GPT calls are skipped due to repeated failures
+    
+    Args:
+        reason: The reason string to include in notes.
+        
+    Returns:
+        A GptDecision with action="flat", confidence=0.0.
+    """
+    return GptDecision(
+        action="flat",
+        confidence=0.0,
+        notes=reason,
+    )
+
+
+def validate_openai_api_key() -> str:
+    """
+    Validate that OPENAI_API_KEY is set and non-empty.
+    
+    Returns:
+        The API key string (never log this value).
+        
+    Raises:
+        RuntimeError: If OPENAI_API_KEY is missing or empty.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or not api_key.strip():
+        raise RuntimeError(
+            "OPENAI_API_KEY environment variable is missing or empty. "
+            "Please set it in your environment or local_env.txt file. "
+            "GPT calls require a valid OpenAI API key."
+        )
+    
+    # Log that we found a key (without exposing it)
+    key_preview = f"{api_key[:7]}...{api_key[-4:]}" if len(api_key) > 11 else "***"
+    logger.info("GPT client: OPENAI_API_KEY found (preview: %s)", key_preview)
+    
+    return api_key
 
 
 def _load_brain_prompt() -> str:
@@ -74,13 +126,30 @@ def _build_user_message(snapshot: Dict[str, Any]) -> str:
 # - size: float 0.0-1.0 representing relative trade size
 # - confidence: float 0.0-1.0 indicating conviction
 # - rationale: short human-readable reasoning for the choice
-def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
+def call_gpt(
+    config: Config,
+    snapshot: Dict[str, Any],
+    state: Optional[Dict[str, Any]] = None,
+) -> GptDecision:
     """Call the GPT model defined in the config.
-
-    DEMO behavior:
-    - If OPENAI_API_KEY is missing, return a flat, zero-confidence decision.
-    - On any error, return a flat 'error fallback' decision.
+    
+    Requires OPENAI_API_KEY to be set (validated at startup).
+    On API errors, returns a flat 'error fallback' decision.
+    
+    If state dict is provided, GPT errors/successes will be tracked for safe mode:
+    - Errors increment gpt_error_count and may trigger gpt_safe_mode
+    - Successes reset gpt_error_count (but don't clear safe mode)
+    
+    Args:
+        config: Runtime configuration.
+        snapshot: Market snapshot to send to GPT.
+        state: Optional state dict for error tracking. If None, errors are not tracked.
+        
+    Returns:
+        GptDecision with action, confidence, and notes.
     """
+    # Import here to avoid circular imports
+    from state_memory import record_gpt_error, record_gpt_success
     def _log_decision_event(decision: GptDecision) -> None:
         try:
             try:
@@ -105,11 +174,15 @@ def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
         except Exception:
             logger.exception("Failed to log GPT decision event", exc_info=True)
 
+    # Get API key (should have been validated at startup, but check again for safety)
     api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        logger.warning("OPENAI_API_KEY missing; returning demo flat decision.")
-        decision = GptDecision(action="flat", confidence=0.0, notes="demo: no GPT key")
+    if not api_key or not api_key.strip():
+        logger.error("OPENAI_API_KEY missing during GPT call. This should have been caught at startup.")
+        decision = GptDecision(action="flat", confidence=0.0, notes="error: API key missing")
         _log_decision_event(decision)
+        # Track error if state provided
+        if state is not None:
+            record_gpt_error(state, time.time())
         return decision
 
     # Allow overriding the model via env var without changing code.
@@ -118,6 +191,7 @@ def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
     try:
         import openai  # type: ignore[attr-defined]
 
+        # Set API key (using legacy v0.x API pattern for openai==0.28.1)
         openai.api_key = api_key
 
         system_prompt = _load_brain_prompt()
@@ -148,9 +222,15 @@ def call_gpt(config: Config, snapshot: Dict[str, Any]) -> GptDecision:
         logger.info("GPT model=%s action=%s confidence=%.3f", model_name, action, confidence)
         decision = GptDecision(action=action, confidence=confidence, notes=notes)
         _log_decision_event(decision)
+        # Track success if state provided
+        if state is not None:
+            record_gpt_success(state)
         return decision
     except Exception as exc:  # noqa: BLE001
         logger.warning("GPT call failed, using fallback: %s", exc)
-        decision = GptDecision(action="flat", confidence=0.0, notes="error fallback")
+        decision = GptDecision(action="flat", confidence=0.0, notes=f"error fallback: {exc}")
         _log_decision_event(decision)
+        # Track error if state provided
+        if state is not None:
+            record_gpt_error(state, time.time())
         return decision

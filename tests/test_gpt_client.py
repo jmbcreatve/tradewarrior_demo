@@ -1,8 +1,10 @@
 import json
 import os
+import sys
 from unittest.mock import patch, MagicMock
+import pytest
 
-from gpt_client import _build_user_message, call_gpt
+from gpt_client import _build_user_message, call_gpt, validate_openai_api_key
 from config import Config
 from schemas import GptDecision
 
@@ -63,9 +65,9 @@ def test_call_gpt_parses_rationale_from_response():
     }
     
     with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
-        with patch("gpt_client.openai") as mock_openai:
-            mock_openai.ChatCompletion.create.return_value = mock_response
-            
+        mock_openai = MagicMock()
+        mock_openai.ChatCompletion.create.return_value = mock_response
+        with patch.dict(sys.modules, {"openai": mock_openai}):
             decision = call_gpt(config, snapshot)
             
             assert isinstance(decision, GptDecision)
@@ -97,9 +99,9 @@ def test_call_gpt_fallback_to_notes_field():
     }
     
     with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
-        with patch("gpt_client.openai") as mock_openai:
-            mock_openai.ChatCompletion.create.return_value = mock_response
-            
+        mock_openai = MagicMock()
+        mock_openai.ChatCompletion.create.return_value = mock_response
+        with patch.dict(sys.modules, {"openai": mock_openai}):
             decision = call_gpt(config, snapshot)
             
             assert isinstance(decision, GptDecision)
@@ -132,9 +134,9 @@ def test_rationale_flows_to_gpt_state_note():
     }
     
     with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
-        with patch("gpt_client.openai") as mock_openai:
-            mock_openai.ChatCompletion.create.return_value = mock_response
-            
+        mock_openai = MagicMock()
+        mock_openai.ChatCompletion.create.return_value = mock_response
+        with patch.dict(sys.modules, {"openai": mock_openai}):
             # Step 1: Call GPT and get decision
             decision = call_gpt(config, snapshot)
             assert decision.notes == expected_rationale
@@ -151,3 +153,73 @@ def test_rationale_flows_to_gpt_state_note():
             # Step 4: Verify it would appear in next snapshot (as build_features.py does)
             next_snapshot_gpt_state_note = state.get("gpt_state_note")
             assert next_snapshot_gpt_state_note == expected_rationale
+
+
+def test_validate_openai_api_key_success():
+    """Test that validate_openai_api_key returns the key when it's set correctly."""
+    test_key = "sk-test1234567890abcdef"
+    
+    with patch.dict(os.environ, {"OPENAI_API_KEY": test_key}, clear=False):
+        result = validate_openai_api_key()
+        assert result == test_key
+
+
+def test_validate_openai_api_key_missing():
+    """Test that validate_openai_api_key raises RuntimeError when key is missing."""
+    with patch.dict(os.environ, {}, clear=True):
+        # Remove OPENAI_API_KEY if it exists
+        if "OPENAI_API_KEY" in os.environ:
+            del os.environ["OPENAI_API_KEY"]
+        
+        with pytest.raises(RuntimeError, match="OPENAI_API_KEY.*missing or empty"):
+            validate_openai_api_key()
+
+
+def test_validate_openai_api_key_empty():
+    """Test that validate_openai_api_key raises RuntimeError when key is empty."""
+    with patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+        with pytest.raises(RuntimeError, match="OPENAI_API_KEY.*missing or empty"):
+            validate_openai_api_key()
+    
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "   "}, clear=False):
+        with pytest.raises(RuntimeError, match="OPENAI_API_KEY.*missing or empty"):
+            validate_openai_api_key()
+
+
+def test_call_gpt_uses_env_var_for_api_key():
+    """Test that call_gpt reads OPENAI_API_KEY from os.environ correctly."""
+    config = Config()
+    snapshot = {"symbol": "BTCUSDT", "timestamp": 1234567890.0, "price": 50000.0}
+    
+    test_key = "sk-test-key-from-env-var"
+    mock_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({
+                        "action": "long",
+                        "size": 0.5,
+                        "confidence": 0.8,
+                        "rationale": "Test rationale"
+                    })
+                }
+            }
+        ]
+    }
+    
+    with patch.dict(os.environ, {"OPENAI_API_KEY": test_key}):
+        # Mock the openai module that gets imported inside call_gpt
+        import sys
+        mock_openai = MagicMock()
+        mock_openai.ChatCompletion.create.return_value = mock_response
+        # Inject mock into sys.modules before call_gpt imports it
+        with patch.dict(sys.modules, {"openai": mock_openai}):
+            decision = call_gpt(config, snapshot)
+            
+            # Verify ChatCompletion.create was called
+            assert mock_openai.ChatCompletion.create.called
+            # Verify the API key was set on the mock module
+            assert mock_openai.api_key == test_key
+            # Verify the decision was made correctly
+            assert decision.action == "long"
+            assert decision.confidence == 0.8

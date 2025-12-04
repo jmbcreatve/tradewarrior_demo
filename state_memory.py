@@ -27,6 +27,11 @@ DEFAULT_STATE: Dict[str, Any] = {
     "daily_pnl": 0.0,              # float: current day's P&L (equity - daily_start_equity)
     "trading_halted": False,        # bool: circuit breaker flag
 
+    # GPT Safe Mode: when GPT is unhealthy, clamp to flat until manually reset
+    "gpt_safe_mode": False,         # bool: if True, skip GPT and force flat decisions
+    "gpt_error_count": 0,           # int: consecutive GPT errors (resets on success)
+    "last_gpt_error_timestamp": None,  # float: Unix timestamp of most recent GPT error
+
     # Positions summary: adapters can store lightweight position views here.
     "open_positions_summary": [],  # type: List[Dict[str, Any]]
 
@@ -85,6 +90,117 @@ def _reset_daily_tracking(state: Dict[str, Any], current_equity: float, current_
         current_equity,
         current_timestamp,
     )
+
+
+# ---------------------------------------------------------------------------
+# GPT Safe Mode Helpers
+# ---------------------------------------------------------------------------
+
+# Policy constants for GPT safe mode activation
+GPT_SAFE_MODE_ERROR_THRESHOLD = 3       # N consecutive errors to trigger safe mode
+GPT_SAFE_MODE_ERROR_WINDOW_SEC = 300.0  # M minutes (in seconds) - errors within this window count
+
+
+def record_gpt_error(state: Dict[str, Any], timestamp: float | None = None) -> bool:
+    """
+    Record a GPT error and potentially activate safe mode.
+    
+    Args:
+        state: The state dict to update.
+        timestamp: Unix timestamp of the error (defaults to now).
+        
+    Returns:
+        True if safe mode was just activated, False otherwise.
+    """
+    import time
+    now = timestamp if timestamp is not None else time.time()
+    
+    last_error_ts = state.get("last_gpt_error_timestamp")
+    current_count = state.get("gpt_error_count", 0)
+    
+    # Check if last error is within the window; if not, reset counter
+    if last_error_ts is not None:
+        time_since_last_error = now - last_error_ts
+        if time_since_last_error > GPT_SAFE_MODE_ERROR_WINDOW_SEC:
+            # Error window expired, start fresh count
+            current_count = 0
+    
+    # Increment error count
+    current_count += 1
+    state["gpt_error_count"] = current_count
+    state["last_gpt_error_timestamp"] = now
+    
+    logger.warning(
+        "GPT error recorded: error_count=%d (threshold=%d), timestamp=%.2f",
+        current_count,
+        GPT_SAFE_MODE_ERROR_THRESHOLD,
+        now,
+    )
+    
+    # Check if we should activate safe mode
+    was_safe_mode = state.get("gpt_safe_mode", False)
+    if current_count >= GPT_SAFE_MODE_ERROR_THRESHOLD and not was_safe_mode:
+        state["gpt_safe_mode"] = True
+        logger.critical(
+            "🚨 GPT SAFE MODE ACTIVATED: %d consecutive errors within %.0f seconds. "
+            "All GPT calls will be skipped and decisions will be forced FLAT until manual reset.",
+            current_count,
+            GPT_SAFE_MODE_ERROR_WINDOW_SEC,
+        )
+        return True
+    
+    return False
+
+
+def record_gpt_success(state: Dict[str, Any]) -> None:
+    """
+    Record a successful GPT call. Resets the error counter.
+    
+    Note: This does NOT automatically clear safe mode - that requires manual reset.
+    
+    Args:
+        state: The state dict to update.
+    """
+    old_count = state.get("gpt_error_count", 0)
+    state["gpt_error_count"] = 0
+    # Note: We do NOT clear last_gpt_error_timestamp so we can see when last error was
+    
+    if old_count > 0:
+        logger.info(
+            "GPT success recorded: error count reset from %d to 0",
+            old_count,
+        )
+
+
+def clear_gpt_safe_mode(state: Dict[str, Any]) -> None:
+    """
+    Manually clear GPT safe mode. Called when operator verifies GPT is healthy.
+    
+    Args:
+        state: The state dict to update.
+    """
+    was_safe_mode = state.get("gpt_safe_mode", False)
+    state["gpt_safe_mode"] = False
+    state["gpt_error_count"] = 0
+    # Keep last_gpt_error_timestamp for audit purposes
+    
+    if was_safe_mode:
+        logger.info(
+            "GPT SAFE MODE CLEARED: Normal GPT operation resumed by manual reset."
+        )
+
+
+def is_gpt_safe_mode(state: Dict[str, Any]) -> bool:
+    """
+    Check if GPT safe mode is currently active.
+    
+    Args:
+        state: The state dict to check.
+        
+    Returns:
+        True if safe mode is active, False otherwise.
+    """
+    return bool(state.get("gpt_safe_mode", False))
 
 
 def _load_from_disk(path: str) -> Dict[str, Any]:
@@ -172,6 +288,30 @@ def _normalise_state(raw: Dict[str, Any], config: Config | None = None) -> Dict[
         state["trading_halted"] = DEFAULT_STATE["trading_halted"]
     else:
         state["trading_halted"] = bool(trading_halted)
+
+    # GPT Safe Mode fields
+    gpt_safe_mode = state.get("gpt_safe_mode")
+    if gpt_safe_mode is None:
+        state["gpt_safe_mode"] = DEFAULT_STATE["gpt_safe_mode"]
+    else:
+        state["gpt_safe_mode"] = bool(gpt_safe_mode)
+
+    try:
+        gpt_error_count = int(state.get("gpt_error_count", 0) or 0)
+    except (TypeError, ValueError):
+        gpt_error_count = 0
+    if gpt_error_count < 0:
+        gpt_error_count = 0
+    state["gpt_error_count"] = gpt_error_count
+
+    last_gpt_error_ts = state.get("last_gpt_error_timestamp")
+    if last_gpt_error_ts is None:
+        state["last_gpt_error_timestamp"] = None
+    else:
+        try:
+            state["last_gpt_error_timestamp"] = float(last_gpt_error_ts)
+        except (TypeError, ValueError):
+            state["last_gpt_error_timestamp"] = None
 
     # Open positions
     ops = state.get("open_positions_summary", DEFAULT_STATE["open_positions_summary"])
@@ -267,6 +407,10 @@ def _fresh_state(config: Config) -> Dict[str, Any]:
     state["daily_start_timestamp"] = None
     state["daily_pnl"] = 0.0
     state["trading_halted"] = False
+    # GPT safe mode starts fresh
+    state["gpt_safe_mode"] = False
+    state["gpt_error_count"] = 0
+    state["last_gpt_error_timestamp"] = None
     return state
 
 
