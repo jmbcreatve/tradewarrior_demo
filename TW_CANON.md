@@ -49,7 +49,7 @@ When starting a new chat, the model should be told which role it is playing and 
 | `build_features.py`            | Builds snapshot dict from raw market data + shapes. Computes liquidity context from fractal swing points, market session classification, and timing state. |
 | `shapes_module.py`             | Deterministic microstructure features (sweeps, FVGs, CHoCH, etc.). |
 | `gatekeeper.py`                | Decides whether to call GPT on a given tick (movement, timing, danger). Enforces rate limits (12 calls/hour, 60s spacing) and includes slow trend timeout (15min) to avoid silent periods during slow drifts. |
-| `gpt_client.py`                | Wraps GPT call + prompt + JSON parsing into a `GptDecision`. Parses "rationale" field from GPT response (with fallback to "notes" for compatibility) and maps to `GptDecision.notes`. |
+| `gpt_client.py`                | Wraps GPT call + prompt + JSON parsing into a `GptDecision`. Parses "rationale" field from GPT response (with fallback to "notes" for compatibility) and maps to `GptDecision.notes`. Validates OPENAI_API_KEY at startup via `validate_openai_api_key()` and fails fast if missing. |
 | `risk_envelope.py`             | Defines `RiskEnvelope` and helpers for computing envelope limits. |
 | `risk_engine.py`               | Applies risk rules and envelopes to a GPT decision → `RiskDecision`. Logs full risk_envelope (including note) and RiskDecision details (size, leverage, stop distances) for every trade decision. |
 | `execution_engine.py`         | Takes a `RiskDecision` and routes to an execution adapter. Logs execution events and traces including risk_envelope and RiskDecision info for approved trades. |
@@ -58,11 +58,11 @@ When starting a new chat, the model should be told which role it is playing and 
 | `adapters/replay_execution_adapter.py` | Replay adapter for backtests; simulates fills & positions. |
 | `adapters/example_data_adapter.py`     | Example candle data adapter. |
 | `adapters/liqdata.py`         | Hyperliquid data adapter for real market data (testnet/mainnet). |
-| `adapters/liqexec.py`         | Hyperliquid execution adapter for real testnet order placement (market orders only, testnet-only safety). |
+| `adapters/liqexec.py`         | Hyperliquid execution adapter for real testnet order placement (market orders only, testnet-only safety). Uses Wallet + Exchange pattern with HL_TESTNET_PRIVATE_KEY env var. |
 | `replay_engine.py`            | Backtest harness using the same spine plus replay adapters. |
 | `state_memory.py`             | Persistent JSON state management (load/validate/save). |
 | `logger_utils.py`             | Central logging setup. |
-| `run_testnet.py`              | Testnet runner script for Hyperliquid testnet trading with safety banners and configuration. |
+| `run_testnet.py`              | Testnet runner script for Hyperliquid testnet trading. Defaults to continuous run_forever loop with periodic status logging (daily P&L, safety status). Supports --once flag for single-tick testing. Includes safety banners, kill switch checks, daily loss limit enforcement, and graceful shutdown. |
 | `tests/`                      | Unit and integration tests for snapshot, gatekeeper, GPT client, risk envelope/engine, execution, replay parity, Hyperliquid adapters, etc. |
 
 ---
@@ -231,7 +231,7 @@ Add rolling memory and regime summaries for GPT while preserving v1 contract.
 Phase 5 – Hyperliquid SIM Integration
 **Status:** 🚧 Partially complete
 - ✅ Hyperliquid data adapter implemented (testnet/mainnet)
-- ✅ Hyperliquid testnet execution adapter implemented (market orders only, testnet-only)
+- ✅ Hyperliquid testnet execution adapter implemented (market orders only, testnet-only, uses Wallet + Exchange pattern with HL_TESTNET_PRIVATE_KEY)
 - ⏳ Replay integration with Hyperliquid data adapter
 - ⏳ Mainnet execution adapter (currently disabled for safety)
 
