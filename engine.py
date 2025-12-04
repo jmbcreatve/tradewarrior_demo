@@ -1,9 +1,10 @@
 import sys
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pprint import pprint
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Callable
 
 from config import Config, load_config
 from data_router import (
@@ -13,15 +14,220 @@ from data_router import (
 )
 from build_features import build_snapshot
 from gatekeeper import should_call_gpt
-from gpt_client import call_gpt
+from gpt_client import call_gpt, validate_openai_api_key, create_safe_mode_decision
 from risk_engine import evaluate_risk, _check_daily_loss_limit
 from execution_engine import execute_decision
-from state_memory import load_state, save_state, reset_state, _reset_daily_tracking
+from state_memory import load_state, save_state, reset_state, _reset_daily_tracking, is_gpt_safe_mode
 from safety_utils import check_trading_halted
 from logger_utils import get_logger
+from schemas import GptDecision, RiskDecision
+from adapters.base_execution_adapter import BaseExecutionAdapter
 
 RUN_ID = uuid.uuid4().hex
 logger = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shared Tick Result (for replay/live parity)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SpineTickResult:
+    """
+    Result of a single spine tick (snapshot → gatekeeper → GPT → risk → execution).
+    
+    Used by both live engine and replay to ensure parity. All fields that matter
+    for decision auditing are captured here.
+    """
+    # Core snapshot info
+    timestamp: float = 0.0
+    price: float = 0.0
+    snapshot_id: int = 0
+    
+    # Gatekeeper result
+    gatekeeper_called: bool = False
+    gatekeeper_reason: str = "not_called"
+    
+    # GPT decision (None if gatekeeper skipped)
+    gpt_decision: Optional[GptDecision] = None
+    gpt_action: str = "flat"
+    gpt_confidence: float = 0.0
+    
+    # Risk decision
+    risk_decision: Optional[RiskDecision] = None
+    approved: bool = False
+    side: str = "flat"
+    position_size: float = 0.0
+    leverage: float = 0.0
+    stop_loss_price: Optional[float] = None
+    take_profit_price: Optional[float] = None
+    risk_reason: str = ""
+    
+    # Risk envelope summary (compact)
+    risk_envelope_summary: Dict[str, Any] = field(default_factory=dict)
+    
+    # Execution result
+    execution_status: str = "skipped"
+    fill_price: Optional[float] = None
+    realized_pnl: Optional[float] = None
+    
+    # Flags
+    safe_mode_active: bool = False
+    
+    def to_parity_trace_entry(self) -> Dict[str, Any]:
+        """Convert to a dict suitable for parity trace logging."""
+        return {
+            "timestamp": self.timestamp,
+            "price": self.price,
+            "snapshot_id": self.snapshot_id,
+            "gatekeeper_called": self.gatekeeper_called,
+            "gatekeeper_reason": self.gatekeeper_reason,
+            "gpt_action": self.gpt_action,
+            "gpt_confidence": self.gpt_confidence,
+            "approved": self.approved,
+            "side": self.side,
+            "position_size": self.position_size,
+            "leverage": self.leverage,
+            "stop_loss_price": self.stop_loss_price,
+            "take_profit_price": self.take_profit_price,
+            "risk_reason": self.risk_reason,
+            "risk_envelope": self.risk_envelope_summary,
+            "execution_status": self.execution_status,
+            "fill_price": self.fill_price,
+            "realized_pnl": self.realized_pnl,
+            "safe_mode_active": self.safe_mode_active,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Shared Spine Tick Function (live and replay parity)
+# ---------------------------------------------------------------------------
+
+def run_spine_tick(
+    snapshot: Dict[str, Any],
+    prev_snapshot: Optional[Dict[str, Any]],
+    state: Dict[str, Any],
+    config: Config,
+    exec_adapter: BaseExecutionAdapter,
+    gpt_caller: Optional[Callable[[Config, Dict[str, Any], Dict[str, Any]], GptDecision]] = None,
+) -> SpineTickResult:
+    """
+    Run the core trading spine: gatekeeper → GPT → risk → execution.
+    
+    This is the shared single-tick function used by both live engine and replay
+    to ensure decision parity. The only difference is the GPT caller and execution
+    adapter provided.
+    
+    Args:
+        snapshot: Current market snapshot dict.
+        prev_snapshot: Previous snapshot (for gatekeeper comparison).
+        state: Mutable state dict (will be updated with GPT/risk decisions).
+        config: Runtime configuration.
+        exec_adapter: Execution adapter for placing orders.
+        gpt_caller: Optional GPT caller function. If None, uses call_gpt.
+                    For replay with stub, pass generate_stub_decision.
+    
+    Returns:
+        SpineTickResult with all decision info for parity tracing.
+    """
+    if gpt_caller is None:
+        gpt_caller = call_gpt
+    
+    result = SpineTickResult(
+        timestamp=snapshot.get("timestamp", 0.0),
+        price=snapshot.get("price", 0.0),
+        snapshot_id=snapshot.get("snapshot_id", 0),
+    )
+    
+    # Extract risk envelope summary for parity trace
+    risk_env = snapshot.get("risk_envelope") or {}
+    result.risk_envelope_summary = {
+        "max_notional": risk_env.get("max_notional"),
+        "max_leverage": risk_env.get("max_leverage"),
+        "max_risk_pct": risk_env.get("max_risk_per_trade_pct"),
+        "max_daily_loss_pct": risk_env.get("max_daily_loss_pct"),
+        "note": risk_env.get("note"),
+    }
+    
+    # --- Check GPT Safe Mode ---
+    if is_gpt_safe_mode(state):
+        result.safe_mode_active = True
+        result.gatekeeper_reason = "safe_mode_active"
+        
+        gpt_decision = create_safe_mode_decision("gpt_safe_mode_active")
+        result.gpt_decision = gpt_decision
+        result.gpt_action = gpt_decision.action
+        result.gpt_confidence = gpt_decision.confidence
+        
+        state["last_gpt_decision"] = gpt_decision.to_dict()
+        state["gpt_state_note"] = gpt_decision.notes
+        
+        risk_decision = evaluate_risk(snapshot, gpt_decision, state, config)
+        result.risk_decision = risk_decision
+        result.approved = risk_decision.approved
+        result.side = risk_decision.side
+        result.position_size = risk_decision.position_size
+        result.leverage = risk_decision.leverage
+        result.stop_loss_price = risk_decision.stop_loss_price
+        result.take_profit_price = risk_decision.take_profit_price
+        result.risk_reason = risk_decision.reason
+        
+        state["last_risk_decision"] = risk_decision.to_dict()
+        result.execution_status = "safe_mode_flat"
+        
+        logger.warning(
+            "SpineTick: GPT SAFE MODE ACTIVE - skipping GPT, forcing FLAT."
+        )
+        return result
+    
+    # --- Gatekeeper check ---
+    gatekeeper_result = should_call_gpt(snapshot, prev_snapshot, state)
+    result.gatekeeper_called = gatekeeper_result.get("should_call_gpt", False)
+    result.gatekeeper_reason = gatekeeper_result.get("reason", "unknown")
+    
+    if not result.gatekeeper_called:
+        result.execution_status = "gatekeeper_skipped"
+        logger.info("SpineTick: gatekeeper skipped GPT (reason=%s).", result.gatekeeper_reason)
+        return result
+    
+    # --- GPT call ---
+    gpt_decision = gpt_caller(config, snapshot, state)
+    result.gpt_decision = gpt_decision
+    result.gpt_action = gpt_decision.action
+    result.gpt_confidence = gpt_decision.confidence
+    
+    state["last_gpt_decision"] = gpt_decision.to_dict()
+    state["gpt_state_note"] = gpt_decision.notes
+    
+    # --- Risk evaluation ---
+    risk_decision = evaluate_risk(snapshot, gpt_decision, state, config)
+    result.risk_decision = risk_decision
+    result.approved = risk_decision.approved
+    result.side = risk_decision.side
+    result.position_size = risk_decision.position_size
+    result.leverage = risk_decision.leverage
+    result.stop_loss_price = risk_decision.stop_loss_price
+    result.take_profit_price = risk_decision.take_profit_price
+    result.risk_reason = risk_decision.reason
+    
+    state["last_risk_decision"] = risk_decision.to_dict()
+    
+    # --- Execution ---
+    execution_result = execute_decision(risk_decision, config, state, exec_adapter)
+    result.execution_status = execution_result.get("status", "unknown")
+    result.fill_price = execution_result.get("fill_price") or execution_result.get("avg_fill_price")
+    result.realized_pnl = execution_result.get("realized_pnl")
+    
+    logger.info(
+        "SpineTick: gpt_action=%s, approved=%s, side=%s, size=%.6f, status=%s",
+        result.gpt_action,
+        result.approved,
+        result.side,
+        result.position_size,
+        result.execution_status,
+    )
+    
+    return result
 
 
 def _log_config_summary(cfg: Config) -> None:
@@ -38,7 +244,9 @@ def _log_config_summary(cfg: Config) -> None:
 
 def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, Any]:
     """
-    Run one full pipeline tick: state -> data -> snapshot -> gatekeeper -> GPT -> risk -> (maybe) execution -> state.
+    Run one full pipeline tick: state -> data -> snapshot -> spine (gatekeeper → GPT → risk → execution) -> state.
+    
+    Uses the shared run_spine_tick() function to ensure live/replay parity.
     Mutates and returns state.
     """
     t0 = time.perf_counter()
@@ -75,37 +283,8 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
         return state
 
     prev_snapshot = state.get("prev_snapshot")
-    if not should_call_gpt(snapshot, prev_snapshot, state):
-        logger.info("Engine: gatekeeper skipped GPT call.")
-        t_decision = t_snap
-        dt_snapshot = t_snap - t0
-        dt_decision = t_decision - t_snap
-        dt_risk = 0.0
-        dt_execution = 0.0
-        context = {
-            "run_id": state.get("run_id"),
-            "snapshot_id": state.get("snapshot_id"),
-            "symbol": state.get("symbol"),
-            "mode": str(getattr(cfg, "execution_mode", "")),
-            "dt_snapshot": dt_snapshot,
-            "dt_decision": dt_decision,
-            "dt_risk": dt_risk,
-            "dt_execution": dt_execution,
-        }
-        state["prev_snapshot"] = snapshot
-        save_state(state, cfg)
-        logger.info("Tick summary: %s", context)
-        return state
 
-    gpt_decision = call_gpt(cfg, snapshot)
-    t_decision = time.perf_counter()
-    state["last_gpt_decision"] = gpt_decision.to_dict()
-    state["gpt_state_note"] = gpt_decision.notes
-
-    risk_decision = evaluate_risk(snapshot, gpt_decision, state, cfg)
-    t_risk = time.perf_counter()
-    state["last_risk_decision"] = risk_decision.to_dict()
-
+    # --- Select execution adapter ---
     exec_adapter = exec_adapters.get(cfg.primary_execution_id)
     if exec_adapter is None:
         logger.warning(
@@ -114,33 +293,50 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
         )
         exec_adapter = exec_adapters["mock"]
 
-    if dry_run:
-        execution_result: Dict[str, Any] = {
-            "status": "dry_run",
-            "side": risk_decision.side,
-            "position_size": risk_decision.position_size,
-            "leverage": risk_decision.leverage,
-            "stop_loss_price": risk_decision.stop_loss_price,
-            "take_profit_price": risk_decision.take_profit_price,
-            "reason": risk_decision.reason,
-        }
-        logger.info(
-            "Dry run: would execute symbol=%s side=%s size=%s leverage=%s stop_loss=%s take_profit=%s",
-            state.get("symbol", cfg.symbol),
-            risk_decision.side,
-            risk_decision.position_size,
-            risk_decision.leverage,
-            risk_decision.stop_loss_price,
-            risk_decision.take_profit_price,
-        )
-    else:
-        execution_result = execute_decision(risk_decision, cfg, state, exec_adapter)
+    # --- Dry run uses a no-op adapter wrapper ---
+    class DryRunAdapter(BaseExecutionAdapter):
+        """Wrapper that logs but doesn't execute."""
+        def __init__(self, inner: BaseExecutionAdapter):
+            self._inner = inner
+            
+        def get_open_positions(self, symbol: str):
+            return self._inner.get_open_positions(symbol)
+            
+        def place_order(self, symbol, side, size, order_type="market", stop_loss=None, take_profit=None, leverage=None):
+            logger.info(
+                "Dry run: would execute symbol=%s side=%s size=%s leverage=%s stop_loss=%s take_profit=%s",
+                symbol, side, size, leverage, stop_loss, take_profit,
+            )
+            return {
+                "status": "dry_run",
+                "side": side,
+                "position_size": size,
+                "leverage": leverage,
+                "stop_loss_price": stop_loss,
+                "take_profit_price": take_profit,
+            }
+            
+        def cancel_all_orders(self, symbol: str):
+            return self._inner.cancel_all_orders(symbol)
+
+    actual_adapter = DryRunAdapter(exec_adapter) if dry_run else exec_adapter
+
+    # --- Run the shared spine tick ---
+    spine_result = run_spine_tick(
+        snapshot=snapshot,
+        prev_snapshot=prev_snapshot,
+        state=state,
+        config=cfg,
+        exec_adapter=actual_adapter,
+        gpt_caller=call_gpt,
+    )
+    
+    t_spine = time.perf_counter()
 
     # --- Update equity from execution results --------------------------------
-    realized_pnl = execution_result.get("realized_pnl")
-    if realized_pnl is not None:
+    if spine_result.realized_pnl is not None:
         try:
-            pnl_value = float(realized_pnl)
+            pnl_value = float(spine_result.realized_pnl)
             old_equity = state.get("equity", 0.0)
             state["equity"] = old_equity + pnl_value
 
@@ -163,7 +359,7 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
                     pnl_value,
                 )
         except (TypeError, ValueError):
-            logger.warning("Invalid realized_pnl in execution result: %s", realized_pnl)
+            logger.warning("Invalid realized_pnl in spine result: %s", spine_result.realized_pnl)
 
     # --- Check daily loss limit after execution -------------------------------
     daily_pnl = state.get("daily_pnl", 0.0)
@@ -186,22 +382,34 @@ def _run_tick(cfg: Config, state: Dict[str, Any], dry_run: bool) -> Dict[str, An
     t_exec = time.perf_counter()
 
     dt_snapshot = t_snap - t0
-    dt_decision = t_decision - t_snap
-    dt_risk = t_risk - t_decision
-    dt_execution = t_exec - t_risk
+    dt_spine = t_spine - t_snap
+    dt_post = t_exec - t_spine
+
+    # Build execution result dict from spine result for state storage
+    execution_result: Dict[str, Any] = {
+        "status": spine_result.execution_status,
+        "side": spine_result.side,
+        "position_size": spine_result.position_size,
+        "fill_price": spine_result.fill_price,
+        "realized_pnl": spine_result.realized_pnl,
+    }
 
     state["last_execution_result"] = execution_result
     state["prev_snapshot"] = snapshot
     save_state(state, cfg)
+    
     context = {
         "run_id": state.get("run_id"),
         "snapshot_id": state.get("snapshot_id"),
         "symbol": state.get("symbol"),
         "mode": str(getattr(cfg, "execution_mode", "")),
+        "gpt_safe_mode": spine_result.safe_mode_active,
+        "gatekeeper_reason": spine_result.gatekeeper_reason,
+        "gpt_action": spine_result.gpt_action,
+        "approved": spine_result.approved,
         "dt_snapshot": dt_snapshot,
-        "dt_decision": dt_decision,
-        "dt_risk": dt_risk,
-        "dt_execution": dt_execution,
+        "dt_spine": dt_spine,
+        "dt_post": dt_post,
     }
     logger.info("Tick summary: %s", context)
     return state
@@ -326,6 +534,15 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    
+    # Validate OpenAI API key (fails fast if missing)
+    try:
+        validate_openai_api_key()
+    except RuntimeError as e:
+        logger.error(f"❌ {e}")
+        logger.error("Please set OPENAI_API_KEY in environment before running engine.")
+        sys.exit(1)
+    
     cfg = load_config(args.config)
     if args.sleep is not None:
         cfg.loop_sleep_seconds = float(args.sleep)

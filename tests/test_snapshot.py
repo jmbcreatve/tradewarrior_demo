@@ -5,6 +5,321 @@ from schemas import validate_snapshot_dict
 from enums import TimingState, enum_to_str
 
 
+# ---------------------------------------------------------------------------
+# TW_CANON 5.1 Snapshot Schema Compliance Tests
+# ---------------------------------------------------------------------------
+
+def test_snapshot_schema_all_required_fields_present():
+    """
+    TW_CANON 5.1: Verify all required snapshot fields are present.
+    
+    This test ensures the snapshot schema matches TW_CANON exactly.
+    Any missing field should fail loudly.
+    """
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+        {"open": 104, "high": 107, "low": 103, "close": 106, "timestamp": 1_001},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    
+    # TW_CANON 5.1 required fields
+    required_fields = {
+        "symbol": str,
+        "timestamp": float,
+        "price": float,
+        "trend": str,
+        "range_position": str,
+        "volatility_mode": str,
+        "flow": dict,
+        "microstructure": dict,
+        "liquidity_context": dict,
+        "fib_context": dict,
+        "htf_context": dict,
+        "danger_mode": bool,
+        "timing_state": str,
+        "market_session": str,
+        "recent_price_path": dict,
+        "risk_context": dict,
+        "risk_envelope": dict,
+        "since_last_gpt": dict,
+        "gpt_state_note": (str, type(None)),  # str or None
+    }
+    
+    for field, expected_type in required_fields.items():
+        assert field in snap, f"TW_CANON 5.1 violation: missing required field '{field}'"
+        
+        if isinstance(expected_type, tuple):
+            # Multiple allowed types (e.g., str or None)
+            assert isinstance(snap[field], expected_type), \
+                f"TW_CANON 5.1 type violation: '{field}' expected {expected_type}, got {type(snap[field])}"
+        else:
+            assert isinstance(snap[field], expected_type), \
+                f"TW_CANON 5.1 type violation: '{field}' expected {expected_type}, got {type(snap[field])}"
+
+
+def test_snapshot_flow_dict_structure():
+    """TW_CANON 5.1: Verify flow dict has required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    flow = snap["flow"]
+    
+    # TW_CANON 5.1: flow dict must have funding, open_interest, skew, skew_bias
+    required_flow_fields = ["funding", "open_interest", "skew", "skew_bias"]
+    for field in required_flow_fields:
+        assert field in flow, f"TW_CANON 5.1 violation: flow missing required field '{field}'"
+
+
+def test_snapshot_microstructure_dict_structure():
+    """TW_CANON 5.1: Verify microstructure dict has required fields."""
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+        {"open": 104, "high": 107, "low": 103, "close": 106, "timestamp": 1_001},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    micro = snap["microstructure"]
+    
+    # TW_CANON 5.1: microstructure must have sweep_up, sweep_down, fvg_up, fvg_down,
+    # choch_direction, compression_active, shape_bias, shape_score
+    required_micro_fields = [
+        "sweep_up", "sweep_down", "fvg_up", "fvg_down",
+        "choch_direction", "compression_active", "shape_bias", "shape_score"
+    ]
+    for field in required_micro_fields:
+        assert field in micro, f"TW_CANON 5.1 violation: microstructure missing required field '{field}'"
+    
+    # shape_score must be float
+    assert isinstance(micro["shape_score"], (int, float)), \
+        f"shape_score must be numeric, got {type(micro['shape_score'])}"
+    
+    # shape_bias must be string
+    assert isinstance(micro["shape_bias"], str), \
+        f"shape_bias must be string, got {type(micro['shape_bias'])}"
+
+
+def test_snapshot_liquidity_context_structure():
+    """TW_CANON 5.1: Verify liquidity_context has required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    liq = snap["liquidity_context"]
+    
+    # TW_CANON 5.1: liquidity_above, liquidity_below (floats or None)
+    assert "liquidity_above" in liq, "Missing liquidity_above"
+    assert "liquidity_below" in liq, "Missing liquidity_below"
+    
+    # Values must be float or None
+    for key in ["liquidity_above", "liquidity_below"]:
+        val = liq[key]
+        assert val is None or isinstance(val, (int, float)), \
+            f"{key} must be float or None, got {type(val)}"
+
+
+def test_snapshot_fib_context_structure():
+    """TW_CANON 5.1: Verify fib_context has required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    fib = snap["fib_context"]
+    
+    # TW_CANON 5.1: macro_zone, micro_zone
+    assert "macro_zone" in fib, "Missing macro_zone"
+    assert "micro_zone" in fib, "Missing micro_zone"
+    assert isinstance(fib["macro_zone"], str), "macro_zone must be string"
+    assert isinstance(fib["micro_zone"], str), "micro_zone must be string"
+
+
+def test_snapshot_htf_context_structure():
+    """TW_CANON 5.1: Verify htf_context has required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    htf = snap["htf_context"]
+    
+    # TW_CANON 5.1: trend_1h, range_pos_1h (placeholder is fine but keys must exist)
+    assert "trend_1h" in htf, "Missing trend_1h"
+    assert "range_pos_1h" in htf, "Missing range_pos_1h"
+    assert isinstance(htf["trend_1h"], str), "trend_1h must be string"
+    assert isinstance(htf["range_pos_1h"], str), "range_pos_1h must be string"
+
+
+def test_snapshot_recent_price_path_structure():
+    """TW_CANON 5.1: Verify recent_price_path has required fields."""
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+        {"open": 104, "high": 107, "low": 103, "close": 106, "timestamp": 1_001},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    rpp = snap["recent_price_path"]
+    
+    # TW_CANON 5.1: ret_1, ret_5, ret_15, impulse_state, lookback_bars
+    required_rpp_fields = ["ret_1", "ret_5", "ret_15", "impulse_state", "lookback_bars"]
+    for field in required_rpp_fields:
+        assert field in rpp, f"Missing recent_price_path.{field}"
+    
+    # Returns must be float
+    for ret_field in ["ret_1", "ret_5", "ret_15"]:
+        assert isinstance(rpp[ret_field], (int, float)), f"{ret_field} must be numeric"
+    
+    # lookback_bars must be int
+    assert isinstance(rpp["lookback_bars"], int), "lookback_bars must be int"
+    
+    # impulse_state must be string
+    assert isinstance(rpp["impulse_state"], str), "impulse_state must be string"
+
+
+def test_snapshot_risk_context_structure():
+    """TW_CANON 5.1: Verify risk_context has required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000, "max_drawdown": 0.02}
+    
+    snap = build_snapshot(config, market_data, state)
+    risk_ctx = snap["risk_context"]
+    
+    # TW_CANON 5.1: equity, max_drawdown, open_positions_summary, last_action, last_confidence
+    required_risk_fields = ["equity", "max_drawdown", "open_positions_summary", "last_action", "last_confidence"]
+    for field in required_risk_fields:
+        assert field in risk_ctx, f"Missing risk_context.{field}"
+    
+    # equity, max_drawdown, last_confidence must be float
+    assert isinstance(risk_ctx["equity"], (int, float)), "equity must be numeric"
+    assert isinstance(risk_ctx["max_drawdown"], (int, float)), "max_drawdown must be numeric"
+    assert isinstance(risk_ctx["last_confidence"], (int, float)), "last_confidence must be numeric"
+    
+    # open_positions_summary must be list
+    assert isinstance(risk_ctx["open_positions_summary"], list), "open_positions_summary must be list"
+    
+    # last_action must be string
+    assert isinstance(risk_ctx["last_action"], str), "last_action must be string"
+
+
+def test_snapshot_risk_envelope_structure():
+    """TW_CANON 5.3: Verify risk_envelope has all required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    risk_env = snap["risk_envelope"]
+    
+    # TW_CANON 5.3 required fields
+    required_env_fields = [
+        "max_leverage",
+        "max_notional",
+        "max_risk_per_trade_pct",
+        "min_stop_distance_pct",
+        "max_stop_distance_pct",
+        "max_daily_loss_pct",
+        "note",
+    ]
+    for field in required_env_fields:
+        assert field in risk_env, f"TW_CANON 5.3 violation: risk_envelope missing '{field}'"
+    
+    # All numeric fields must be float
+    numeric_fields = [
+        "max_leverage", "max_notional", "max_risk_per_trade_pct",
+        "min_stop_distance_pct", "max_stop_distance_pct", "max_daily_loss_pct"
+    ]
+    for field in numeric_fields:
+        assert isinstance(risk_env[field], (int, float)), f"{field} must be numeric"
+    
+    # note must be string
+    assert isinstance(risk_env["note"], str), "risk_envelope.note must be string"
+
+
+def test_snapshot_since_last_gpt_structure():
+    """TW_CANON 5.1: Verify since_last_gpt has required fields."""
+    config = Config()
+    candles = [{"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000}]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    slg = snap["since_last_gpt"]
+    
+    # TW_CANON 5.1: time_since_last_gpt_sec, price_change_pct_since_last_gpt,
+    # equity_change_since_last_gpt, trades_since_last_gpt
+    required_slg_fields = [
+        "time_since_last_gpt_sec",
+        "price_change_pct_since_last_gpt",
+        "equity_change_since_last_gpt",
+        "trades_since_last_gpt",
+    ]
+    for field in required_slg_fields:
+        assert field in slg, f"Missing since_last_gpt.{field}"
+    
+    # time/price/equity must be float
+    float_fields = ["time_since_last_gpt_sec", "price_change_pct_since_last_gpt", "equity_change_since_last_gpt"]
+    for field in float_fields:
+        assert isinstance(slg[field], (int, float)), f"{field} must be numeric"
+    
+    # trades_since_last_gpt must be int
+    assert isinstance(slg["trades_since_last_gpt"], int), "trades_since_last_gpt must be int"
+
+
+def test_snapshot_enum_values_valid():
+    """TW_CANON 5.1: Verify enum fields have valid values."""
+    config = Config()
+    candles = [
+        {"open": 100, "high": 105, "low": 99, "close": 104, "timestamp": 1_000},
+        {"open": 104, "high": 107, "low": 103, "close": 106, "timestamp": 1_001},
+    ]
+    market_data = {"candles": candles, "funding": 0.01, "open_interest": 1000, "skew": 0.2}
+    state = {"symbol": "TEST", "equity": 5_000}
+    
+    snap = build_snapshot(config, market_data, state)
+    
+    # trend: "up" | "down" | "sideways" | "unknown"
+    valid_trends = {"up", "down", "sideways", "unknown"}
+    assert snap["trend"] in valid_trends, f"Invalid trend: {snap['trend']}"
+    
+    # range_position: "extreme_low" | "low" | "mid" | "high" | "extreme_high" | "unknown"
+    valid_range_positions = {"extreme_low", "low", "mid", "high", "extreme_high", "unknown"}
+    assert snap["range_position"] in valid_range_positions, f"Invalid range_position: {snap['range_position']}"
+    
+    # volatility_mode: "low" | "normal" | "high" | "explosive" | "unknown"
+    valid_vol_modes = {"low", "normal", "high", "explosive", "unknown"}
+    assert snap["volatility_mode"] in valid_vol_modes, f"Invalid volatility_mode: {snap['volatility_mode']}"
+    
+    # timing_state: "avoid" | "cautious" | "normal" | "aggressive" | "unknown"
+    valid_timing_states = {"avoid", "cautious", "normal", "aggressive", "unknown"}
+    assert snap["timing_state"] in valid_timing_states, f"Invalid timing_state: {snap['timing_state']}"
+    
+    # market_session: "ASIA" | "EUROPE" | "US" | "OFF_HOURS"
+    valid_sessions = {"ASIA", "EUROPE", "US", "OFF_HOURS"}
+    assert snap["market_session"] in valid_sessions, f"Invalid market_session: {snap['market_session']}"
+    
+    # danger_mode: bool
+    assert isinstance(snap["danger_mode"], bool), "danger_mode must be bool"
+
+
 def test_validate_snapshot_fills_defaults():
     raw = {
         "symbol": None,

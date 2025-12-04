@@ -304,3 +304,88 @@ def test_risk_allows_trade_when_daily_loss_under_limit():
 
     assert decision.approved is True
     assert decision.side == Side.LONG.value
+
+
+def test_risk_logs_envelope_for_rejected_trades(caplog):
+    """Verify that rejected trades also log risk_envelope info for auditability."""
+    config = Config()
+    # Use a snapshot with zeroed envelope to force rejection
+    snapshot = {
+        "symbol": "BTCUSDT",
+        "timestamp": 1000.0,
+        "price": 100.0,
+        "volatility_mode": "normal",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.0,  # Zero to force rejection
+            "max_leverage": 0.0,
+            "max_notional": 0.0,
+            "min_stop_distance_pct": 0.005,
+            "max_stop_distance_pct": 0.03,
+            "max_daily_loss_pct": 0.03,
+            "note": "test_zeroed_envelope",
+        },
+    }
+    state = {"equity": 10_000}
+
+    with caplog.at_level("INFO"):
+        decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=0.9), state, config)
+
+    assert decision.approved is False
+    
+    # Find the RiskDecision event log for rejected trade
+    risk_log_found = False
+    for record in caplog.records:
+        if "RiskDecision event:" in record.message:
+            risk_log_found = True
+            msg = record.message
+            
+            # Verify risk_envelope is present even for rejected trades
+            assert "risk_envelope" in msg or "'risk_envelope'" in msg, \
+                f"risk_envelope not found in rejected trade log: {msg}"
+            
+            # Verify the rejection is logged
+            assert "approved" in msg and "False" in msg, \
+                f"approved=False not found in log: {msg}"
+            
+            break
+    
+    assert risk_log_found, "RiskDecision event log not found for rejected trade"
+
+
+def test_risk_logs_envelope_for_gpt_flat_action(caplog):
+    """Verify that GPT flat actions also get logged with envelope info."""
+    config = Config(risk_per_trade=0.01, max_leverage=3.0)
+    snapshot = {
+        "symbol": "BTCUSDT",
+        "timestamp": 1000.0,
+        "price": 100.0,
+        "volatility_mode": "normal",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.01,
+            "max_leverage": 3.0,
+            "max_notional": 5000.0,
+            "note": "baseline",
+        },
+    }
+    state = {"equity": 10_000}
+
+    with caplog.at_level("INFO"):
+        decision = evaluate_risk(snapshot, GptDecision(action="flat", confidence=0.8), state, config)
+
+    assert decision.approved is False
+    assert decision.side == Side.FLAT.value
+    
+    # Verify logging occurred
+    found_gpt_flat_log = False
+    for record in caplog.records:
+        if "GPT requested FLAT" in record.message:
+            found_gpt_flat_log = True
+            break
+    
+    assert found_gpt_flat_log, "GPT flat log not found"

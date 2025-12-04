@@ -5,19 +5,20 @@ import csv
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from adapters.base_execution_adapter import BaseExecutionAdapter
 from adapters.mock_data_adapter import MockDataAdapter
 from build_features import build_snapshot
 from config import Config, load_config
-from execution_engine import execute_decision
-from gatekeeper import should_call_gpt
 from gpt_client import call_gpt
 from logger_utils import get_logger
 from replay_gpt_stub import generate_stub_decision
-from risk_engine import evaluate_risk
 from state_memory import load_state
+from schemas import GptDecision
+
+# Import the shared spine tick function for live/replay parity
+from engine import run_spine_tick, SpineTickResult
 
 logger = get_logger(__name__)
 
@@ -220,6 +221,21 @@ def _write_replay_exports(
 
 
 # ---------------------------------------------------------------------------
+# GPT caller wrapper for replay (stub or real)
+# ---------------------------------------------------------------------------
+
+
+def _make_gpt_caller(use_stub: bool) -> Callable[[Config, Dict[str, Any], Dict[str, Any]], GptDecision]:
+    """Create a GPT caller function for replay (either stub or real)."""
+    if use_stub:
+        def stub_caller(config: Config, snapshot: Dict[str, Any], state: Dict[str, Any]) -> GptDecision:
+            return generate_stub_decision(snapshot)
+        return stub_caller
+    else:
+        return call_gpt
+
+
+# ---------------------------------------------------------------------------
 # Core replay harness
 # ---------------------------------------------------------------------------
 
@@ -228,8 +244,9 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     """
     Run a full backtest loop over a list of candle dicts for one symbol/timeframe.
 
-    Reuses the same build_snapshot -> gatekeeper -> GPT -> risk -> execution path
-    as the live engine, but executes fills locally and tracks equity per step.
+    Uses the shared run_spine_tick() function to ensure live/replay parity.
+    The same gatekeeper → GPT → risk → execution path as live engine,
+    but with a replay execution adapter and optional GPT stub.
     """
     state = load_state(config)
     # Start from a clean, in-memory state so replay does not mutate live files.
@@ -241,6 +258,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     state["last_gpt_call_walltime"] = 0.0
     state["last_gpt_snapshot"] = None
     state["prev_snapshot"] = None
+    state["snapshot_id"] = 0
 
     # Decide whether to use the deterministic GPT stub for this replay run.
     stub_active = bool(use_gpt_stub or not os.getenv("OPENAI_API_KEY"))
@@ -248,6 +266,9 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         logger.warning("OPENAI_API_KEY missing; using GPT stub for replay.")
     mode_msg = "GPT stub (deterministic)" if stub_active else "real GPT client"
     print(f"Replay GPT mode: {mode_msg}")
+
+    # Create the appropriate GPT caller
+    gpt_caller = _make_gpt_caller(stub_active)
 
     exec_adapter = ReplayExecutionAdapter()
 
@@ -258,58 +279,8 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     prev_snapshot: Optional[Dict[str, Any]] = None
     parity_trace: List[Dict[str, Any]] = []
 
-    def _record_parity_entry(
-        snapshot: Dict[str, Any],
-        gpt_decision: Any,
-        risk_decision: Any,
-        execution_result: Dict[str, Any],
-        ts_value: float,
-    ) -> None:
-        gpt_side = None
-        gpt_conf = None
-        if gpt_decision is not None:
-            try:
-                gpt_side = getattr(gpt_decision, "action", None) or getattr(gpt_decision, "side", None)
-                gpt_conf = getattr(gpt_decision, "confidence", None)
-            except Exception:
-                try:
-                    gpt_side = gpt_decision.get("action") or gpt_decision.get("side")
-                    gpt_conf = gpt_decision.get("confidence")
-                except Exception:
-                    gpt_side = None
-                    gpt_conf = None
-
-        exec_status = execution_result.get("status", "skipped") if execution_result else "skipped"
-        fill_price = None
-        if execution_result:
-            fill_price = execution_result.get("fill_price") or execution_result.get("avg_fill_price")
-            if fill_price is None:
-                position_summary = execution_result.get("position") or execution_result.get("position_summary")
-                if isinstance(position_summary, dict):
-                    fill_price = position_summary.get("entry_price")
-
-        parity_trace.append(
-            {
-                "timestamp": snapshot.get("timestamp", ts_value),
-                "price": snapshot.get("price"),
-                "snapshot_id": snapshot.get("snapshot_id"),
-                "gpt_side": gpt_side,
-                "gpt_confidence": gpt_conf,
-                "approved": getattr(risk_decision, "approved", False) if risk_decision is not None else False,
-                "side": getattr(risk_decision, "side", "flat") if risk_decision is not None else "flat",
-                "position_size": getattr(risk_decision, "position_size", 0.0) if risk_decision is not None else 0.0,
-                "leverage": getattr(risk_decision, "leverage", 0.0) if risk_decision is not None else 0.0,
-                "execution_status": exec_status,
-                "fill_price": fill_price,
-                "realized_pnl": execution_result.get("realized_pnl") if execution_result else None,
-            }
-        )
-
     for idx, candle in enumerate(candles):
         ts = _safe_float(candle.get("timestamp", idx), float(idx))
-        gpt_decision: Any = None
-        risk_decision: Any = None
-        execution_result: Dict[str, Any] = {"status": "skipped"}
 
         # If we were in a trade, close it on this bar (1-bar hold with stop/TP checks).
         if open_position:
@@ -333,6 +304,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
 
         # Update equity stats before generating the next snapshot.
         state["equity"] = equity
+        state["snapshot_id"] = idx + 1
 
         market_data: Dict[str, Any] = {
             "candles": candles[: idx + 1],
@@ -342,44 +314,32 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         }
 
         snapshot = build_snapshot(config, market_data, state)
-
-        if not should_call_gpt(snapshot, prev_snapshot, state):
-            _record_parity_entry(
-                snapshot,
-                gpt_decision,
-                risk_decision,
-                execution_result,
-                ts_value=ts,
-            )
-            prev_snapshot = snapshot
-            equity_curve.append(equity)
-            continue
-
-        if stub_active:
-            gpt_decision = generate_stub_decision(snapshot)
-        else:
-            gpt_decision = call_gpt(config, snapshot)
-        state["last_gpt_decision"] = gpt_decision.to_dict()
-        state["gpt_state_note"] = gpt_decision.notes
-        state["last_action"] = gpt_decision.action
-        state["last_confidence"] = gpt_decision.confidence
-
-        risk_decision = evaluate_risk(snapshot, gpt_decision, state, config)
-
         exec_adapter.set_current_price(snapshot.get("price", 0.0))
-        execution_result = execute_decision(risk_decision, config, state, exec_adapter)
-        logger.info("Replay execution result: %s", execution_result)
 
-        if risk_decision.approved and risk_decision.side != "flat":
+        # --- Use shared spine tick for live/replay parity ---
+        spine_result: SpineTickResult = run_spine_tick(
+            snapshot=snapshot,
+            prev_snapshot=prev_snapshot,
+            state=state,
+            config=config,
+            exec_adapter=exec_adapter,
+            gpt_caller=gpt_caller,
+        )
+
+        # Record parity trace entry using the standardized format
+        parity_trace.append(spine_result.to_parity_trace_entry())
+
+        # Handle position tracking based on spine result
+        if spine_result.approved and spine_result.side != "flat":
             position = {
                 "symbol": config.symbol,
-                "side": risk_decision.side,
-                "size": risk_decision.position_size,
+                "side": spine_result.side,
+                "size": spine_result.position_size,
                 "entry_price": snapshot.get("price", 0.0),
                 "timestamp": ts,
-                "stop_loss": risk_decision.stop_loss_price,
-                "take_profit": risk_decision.take_profit_price,
-                "leverage": risk_decision.leverage,
+                "stop_loss": spine_result.stop_loss_price,
+                "take_profit": spine_result.take_profit_price,
+                "leverage": spine_result.leverage,
                 "equity_at_entry": equity,
             }
             open_position = position
@@ -392,18 +352,12 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
                     "timestamp": ts,
                 }
             ]
-        else:
+        elif spine_result.gatekeeper_called:
+            # Gatekeeper called but trade not approved - clear positions
             state["open_positions_summary"] = []
 
         prev_snapshot = snapshot
         state["prev_snapshot"] = snapshot
-        _record_parity_entry(
-            snapshot,
-            gpt_decision,
-            risk_decision,
-            execution_result,
-            ts_value=ts,
-        )
         equity_curve.append(equity)
 
     # If we ended with an open trade, force-close it at the last seen price.

@@ -1,304 +1,352 @@
-# TradeWarrior Canon
-_Last updated: 2025-12-03 (VPS → GitHub → local sync completed)_
+TradeWarrior Canon
 
----
+Last updated: 2025-12-04
 
-## 1. Overview
+1. Overview
 
-TradeWarrior is an automated trading agent built in Python.  
-It runs a loop of: **config/state → data adapters → snapshot → gatekeeper → GPT policy → risk engine → execution adapter → state**, plus a replay engine for backtesting and analytics.
+TradeWarrior is an automated trading agent in Python.
 
-Primary goals:
+Core spine (must stay intact):
 
-- Research‑grade replay harness and parity with live engine.
-- Explicit, testable contract between snapshot → GPT → risk → execution.
-- Strict, downward‑only risk envelopes around any GPT suggestion.
-- Eventually: safe Hyperliquid testnet/live modes behind hard limits.
+config/state → data adapters → build_snapshot → gatekeeper → GPT → risk_engine → execution_engine → state
 
----
+Replay uses the same spine with replay adapters.
 
-## 2. Roles & Workflow (for LLMs + human)
+Goals:
 
-- **Architect** – designs phases, invariants, and contracts. Never edits code directly.
-- **Foreman** – turns architecture into concrete tasks and prompts for code workers.
-- **Craftsman** – edits code (Cursor / Codex / local dev) following this CANON.
-- **Inspector** – audits the repo and tests for drift vs this document and flags risks.
+Research‑grade replay + live parity.
 
-When starting a new chat, the model should be told which role it is playing and to treat this file as the source of truth.
+Explicit contract between snapshot → GPT → risk → execution.
 
----
+Strict downward‑only risk envelopes around GPT suggestions.
 
-## 3. Invariants (do not casually break)
+Eventually: safe Hyperliquid testnet/live behind hard limits.
 
-- The **spine** always follows:  
-  `config/state → data adapters → build_snapshot → gatekeeper → GPT → risk_engine → execution_engine → state`.
-- **Risk is downward‑only capped**: risk %, leverage, and notional exposure can only be reduced relative to config/envelope, never increased.
-- GPT **never talks directly to an exchange**. All external side‑effects go through `execution_engine.py` and an execution adapter.
-- `state_memory.py` is the **only module** that reads/writes persistent JSON state on disk.
-- Replay harness must reuse the same snapshot → gatekeeper → GPT → risk → execution flow as live (only data + execution adapters differ).
-- Tests in `tests/` are treated as contracts; they must pass before merging significant changes.
+2. Roles & Workflow
 
----
+We use Architect → Construction Crew:
 
-## 4. Module Map (high level)
+Architect: defines phases, invariants, and contracts as short worker prompts.
 
-| File / Dir                     | Purpose |
-|--------------------------------|---------|
-| `config.py`                    | Runtime configuration (symbol, risk caps, intervals, paths, testnet mode, initial equity). |
-| `engine.py`                    | Main orchestrator loop for live/demo trading. |
-| `build_features.py`            | Builds snapshot dict from raw market data + shapes. Computes liquidity context from fractal swing points, market session classification, and timing state. |
-| `shapes_module.py`             | Deterministic microstructure features (sweeps, FVGs, CHoCH, etc.). |
-| `gatekeeper.py`                | Decides whether to call GPT on a given tick (movement, timing, danger). Enforces rate limits (12 calls/hour, 60s spacing) and includes slow trend timeout (15min) to avoid silent periods during slow drifts. |
-| `gpt_client.py`                | Wraps GPT call + prompt + JSON parsing into a `GptDecision`. Parses "rationale" field from GPT response (with fallback to "notes" for compatibility) and maps to `GptDecision.notes`. Validates OPENAI_API_KEY at startup via `validate_openai_api_key()` and fails fast if missing. |
-| `risk_envelope.py`             | Defines `RiskEnvelope` and helpers for computing envelope limits. |
-| `risk_engine.py`               | Applies risk rules and envelopes to a GPT decision → `RiskDecision`. Logs full risk_envelope (including note) and RiskDecision details (size, leverage, stop distances) for every trade decision. |
-| `execution_engine.py`         | Takes a `RiskDecision` and routes to an execution adapter. Logs execution events and traces including risk_envelope and RiskDecision info for approved trades. |
-| `adapters/base_execution_adapter.py` | Base interface for execution adapters. |
-| `adapters/mock_execution_adapter.py` | Demo/mock execution adapter for testing. |
-| `adapters/replay_execution_adapter.py` | Replay adapter for backtests; simulates fills & positions. |
-| `adapters/example_data_adapter.py`     | Example candle data adapter. |
-| `adapters/liqdata.py`         | Hyperliquid data adapter for real market data (testnet/mainnet). |
-| `adapters/liqexec.py`         | Hyperliquid execution adapter for real testnet order placement (market orders only, testnet-only safety). Uses Wallet + Exchange pattern with HL_TESTNET_PRIVATE_KEY env var. |
-| `replay_engine.py`            | Backtest harness using the same spine plus replay adapters. |
-| `state_memory.py`             | Persistent JSON state management (load/validate/save). |
-| `logger_utils.py`             | Central logging setup. |
-| `run_testnet.py`              | Testnet runner script for Hyperliquid testnet trading. Defaults to continuous run_forever loop with periodic status logging (daily P&L, safety status). Supports --once flag for single-tick testing. Includes safety banners, kill switch checks, daily loss limit enforcement, and graceful shutdown. |
-| `tests/`                      | Unit and integration tests for snapshot, gatekeeper, GPT client, risk envelope/engine, execution, replay parity, Hyperliquid adapters, etc. |
+Construction Crew: edits code, runs tests, updates TW_CANON.md + TW_LOG.md following those prompts.
 
----
+All LLM‑driven code changes:
 
-## 5. Core Contracts
+Must come from an Architect prompt.
 
-These contracts are what matter for GPT/risk/execution integration.  
-If you change them, update this file and the tests.
+Must preserve the spine + downward‑only risk rules.
 
-### 5.1 Snapshot schema (v1)
+Must treat tests as non‑negotiable contracts.
 
-`build_snapshot` must produce a dict including at least:
+3. Invariants (do not break)
 
-- `symbol`: str
-- `timestamp`: float (unix seconds)
-- `price`: float (last/close)
-- `trend`: str (`"up" | "down" | "sideways" | "unknown"`)
-- `range_position`: str (`"extreme_low" | "low" | "mid" | "high" | "extreme_high" | "unknown"`)
-- `volatility_mode`: str (`"low" | "normal" | "high" | "explosive" | "unknown"`)
-- `flow`: dict with `funding`, `open_interest`, `skew`, `skew_bias`
-- `microstructure`: dict with keys such as `sweep_up`, `sweep_down`, `fvg_up`, `fvg_down`, `choch_direction`, `compression_active`, `shape_bias`, `shape_score`
-- `liquidity_context`: dict with `liquidity_above` (float or None) and `liquidity_below` (float or None) - computed from fractal swing points and recent extremes
-- `fib_context`: dict with `macro_zone` and `micro_zone` (e.g. `"macro_discount" | "macro_premium"`)
-- `htf_context`: dict with `trend_1h` and `range_pos_1h` (higher-timeframe context; currently placeholder)
-- `danger_mode`: bool (true when environment is dangerous; risk should clamp hard)
-- `timing_state`: str (`"avoid" | "cautious" | "normal" | "aggressive" | "unknown"`) - derived from market session
-- `market_session`: str (`"ASIA" | "EUROPE" | "US" | "OFF_HOURS"`) - raw session label based on UTC hour
-- `recent_price_path`: dict with `ret_1`, `ret_5`, `ret_15`, `impulse_state`, `lookback_bars`
-- `risk_context`: dict with `equity`, `max_drawdown`, `open_positions_summary`, `last_action`, `last_confidence`
-- `risk_envelope`: dict with risk limits (`max_notional`, `max_leverage`, `max_risk_per_trade_pct`, etc.)
-- `since_last_gpt`: dict with time/price/equity changes since last GPT call
-- `gpt_state_note`: str or None (short text note from prior GPT decisions)
+**Spine order is fixed:**
+config/state → data adapters → snapshot → gatekeeper → GPT → risk → execution → state.
 
-Implementation detail may extend this; tests and GPT prompt should always assume these fields exist.
+**Shared tick function for live/replay parity:**
+Both engine.py and replay_engine.py use the same `run_spine_tick()` function (defined in engine.py) for the core decision spine: gatekeeper → GPT → risk → execution. This ensures identical decision logic regardless of whether running live or in replay mode. The only differences are the adapters provided (live data/execution vs mock/replay).
 
----
+**Risk is capped downward‑only:** risk %, leverage, and notional can only be ≤ config/envelope caps, never above.
 
-### 5.2 GPT Action schema (v1)
+**GPT never talks directly to exchanges.** All side‑effects go through execution_engine.py and an execution adapter.
 
-GPT must return a JSON object shaped as:
+**state_memory.py is the ONLY module that reads/writes persistent JSON state.** No other module may write to state files. Replay exports (CSV, JSONL) go to analytics directories and are clearly separate from state.
 
-```json
+**Replay harness reuses the exact snapshot → gatekeeper → GPT → risk → execution flow** via the shared `run_spine_tick()` function. Only adapters differ (replay execution adapter, optional GPT stub).
+
+**Parity trace includes full decision context:** timestamp, price, gpt_action, approved, side, position_size, leverage, risk_envelope summary, and execution_status. This enables auditing and verification that replay matches live decisions.
+
+Tests under tests/ are contracts; significant changes must keep them green or update tests in the same task.
+
+4. Module Map (short)
+
+config.py – Runtime config (symbol, risk caps, intervals, paths, testnet mode, initial equity). Environment-agnostic: does not read .env files or environment variables directly (except optional GPT model override). All secrets must come from OS environment variables at runtime, not from .env files.
+
+engine.py – Main live/demo loop. **Exports `run_spine_tick()` and `SpineTickResult`** - the shared single-tick function used by both live and replay to ensure decision parity.
+
+build_features.py – Builds snapshot dict from data + shapes; adds liquidity/session/timing context. Validates against TW_CANON 5.1 schema.
+
+schemas.py – Defines MarketSnapshot, GptDecision, RiskDecision dataclasses and `validate_snapshot_dict()` for schema validation.
+
+shapes_module.py – Deterministic microstructure features (sweeps, FVGs, CHoCH, etc.).
+
+gatekeeper.py – Decides whether to call GPT; enforces ≤ 12 calls/hour, ≥ 60s spacing, slow‑trend timeout (~15 min). Returns dict with should_call_gpt and reason.
+
+gpt_client.py – Wraps GPT call + prompt + JSON parse into GptDecision. Uses rationale → GptDecision.notes, with fallback to notes. Validates OPENAI_API_KEY at startup. Tracks errors for safe mode.
+
+risk_envelope.py – Defines RiskEnvelope and helpers to compute limits.
+
+risk_engine.py – Applies envelopes and rules to GPT decisions → RiskDecision. **Logs full RiskEnvelope (including note) and RiskDecision for every trade decision**, both approved and rejected.
+
+execution_engine.py – Consumes RiskDecision, calls execution adapter. **Logs full risk_envelope and RiskDecision** for auditability.
+
+adapters/*.py – Data and execution adapters:
+
+mock_execution_adapter.py – Demo/mock execution.
+
+replay_execution_adapter.py – Simulated fills for replay (defined in replay_engine.py).
+
+example_data_adapter.py – Example candle data.
+
+liqdata.py – Hyperliquid data (testnet/mainnet).
+
+liqexec.py – Hyperliquid testnet execution (market‑only, reads HL_TESTNET_PRIVATE_KEY from OS environment variables).
+
+replay_engine.py – Backtest harness; **uses shared `run_spine_tick()` for live/replay parity**. Emits trades/equity + parity trace with full decision context.
+
+state_memory.py – **ONLY module that writes persistent JSON state.** Load/validate/save state, GPT safe mode helpers, daily tracking.
+
+logger_utils.py – Logging setup.
+
+safety_utils.py – Kill switch and circuit breaker checks.
+
+run_testnet.py – Hyperliquid testnet runner, continuous loop, daily P&L + safety logs, loss limits, kill switch. Reads secrets from OS environment variables (HL_TESTNET_PRIVATE_KEY, OPENAI_API_KEY). Optional .env file loading is a convenience helper only, not required.
+
+tests/ – Snapshot schema compliance, gatekeeper, GPT client, risk envelope/engine, execution, **replay parity**, adapters, safety utils, GPT safe mode. Tests are contracts.
+
+5. Core Contracts
+
+If these change, update this file and tests.
+
+5.1 Snapshot schema (v1)
+
+build_snapshot must return a dict with at least:
+
+symbol: str
+
+timestamp: float (unix seconds)
+
+price: float
+
+trend: "up" | "down" | "sideways" | "unknown"
+
+range_position: "extreme_low" | "low" | "mid" | "high" | "extreme_high" | "unknown"
+
+volatility_mode: "low" | "normal" | "high" | "explosive" | "unknown"
+
+flow: dict with funding, open_interest, skew, skew_bias
+
+microstructure: dict with at least: sweep_up, sweep_down, fvg_up, fvg_down, choch_direction, compression_active, shape_bias, shape_score
+
+liquidity_context: dict with liquidity_above, liquidity_below (floats or None)
+
+fib_context: dict with macro_zone, micro_zone
+
+htf_context: dict with trend_1h, range_pos_1h (placeholder is fine but keys must exist)
+
+danger_mode: bool
+
+timing_state: "avoid" | "cautious" | "normal" | "aggressive" | "unknown"
+
+market_session: "ASIA" | "EUROPE" | "US" | "OFF_HOURS"
+
+recent_price_path: dict with ret_1, ret_5, ret_15, impulse_state, lookback_bars
+
+risk_context: dict with equity, max_drawdown, open_positions_summary, last_action, last_confidence
+
+risk_envelope: dict (see 5.3)
+
+since_last_gpt: dict with time_since_last_gpt_sec, price_change_pct_since_last_gpt, equity_change_since_last_gpt, trades_since_last_gpt
+
+gpt_state_note: str or None
+
+Implementation can add more fields, but tests/GPT prompt assume these exist.
+
+5.2 GPT Action schema (v1)
+
+GPT must return JSON:
+
 {
   "action": "long" | "short" | "flat",
   "size": 0.0_to_1.0,
   "confidence": 0.0_to_1.0,
-  "rationale": "short explanation string"
+  "rationale": "short explanation"
 }
-```
 
-**Field consistency:**
-- The `rationale` field is the canonical name in the GPT prompt (`brain.txt`) and JSON response.
-- `gpt_client.py` parses `rationale` from the GPT response and maps it to `GptDecision.notes` internally.
-- The rationale flows through: GPT response → `GptDecision.notes` → `state["gpt_state_note"]` → next snapshot's `gpt_state_note` field.
-- For backward compatibility, `gpt_client.py` falls back to parsing `notes` if `rationale` is missing.
 
-**Notes:**
-- `size` is a fraction of max allowed size, not absolute notional.
-- `confidence` is interpreted as model conviction; risk engine can further scale based on regime.
-- On any parse failure, `gpt_client` must fall back to `action="flat"`, `size=0.0`, `confidence=0.0` with a clear log entry.
+Rules:
+
+rationale is the canonical field in prompt + parse.
+
+gpt_client.py maps rationale → GptDecision.notes, falling back to notes if needed.
+
+Rationale path: GPT → GptDecision.notes → state["gpt_state_note"] → next snapshot’s gpt_state_note.
+
+size is a fraction of max allowed size, not absolute.
+
+confidence is conviction; risk engine may scale further.
+
+On parse failure, gpt_client must fall back to:
+action="flat", size=0.0, confidence=0.0 and log clearly.
 
 5.3 RiskEnvelope schema (v1)
-RiskEnvelope defines caps for this decision:
+
+Caps for a single decision:
 
 max_leverage: float
 
-max_notional: float (absolute value cap for position notional)
+max_notional: float
 
-max_risk_per_trade_pct: float (max % of equity to risk on the trade)
+max_risk_per_trade_pct: float (of equity)
 
-min_stop_distance_pct: float (minimum stop distance as fraction of price)
+min_stop_distance_pct: float (of price)
 
-max_stop_distance_pct: float (maximum stop distance as fraction of price)
+max_stop_distance_pct: float
 
-max_daily_loss_pct: float (maximum daily loss percentage)
+max_daily_loss_pct: float
 
-note: string (explains why envelope was tightened, e.g. "baseline_vol;timing_normal", "trim_for_vol;timing_cautious", "danger_mode")
+note: str (e.g. "baseline_vol;timing_normal", "trim_for_vol;timing_cautious", "danger_mode")
 
-Risk engine must never exceed these limits even if config and GPT suggest otherwise. The envelope and its note are logged for every trade decision to enable audit of risk behavior during testnet runs.
+Risk engine must never exceed these limits even if config or GPT suggests more.
+Envelope + note must be logged for every trade decision.
 
 5.4 RiskDecision / Decision object (v1)
-Internal object passed from risk engine to execution engine:
 
-python
-Copy code
+Internal object from risk → execution:
+
 {
   "approved": bool,
   "side": "long" | "short" | "flat",
-  "position_size": float,        # units/contracts
+  "position_size": float,       # units/contracts
   "leverage": float,
   "notional": float,
-  "stop_loss_price": float | null,
-  "take_profit_price": float | null,
-  "reason": str,                 # why approved/rejected
-  "envelope": { ... },           # snapshot of RiskEnvelope used
-  "gpt_action": { ... },         # raw GPT action payload for logging
+  "stop_loss_price": float | None,
+  "take_profit_price": float | None,
+  "reason": str,                # why approved/rejected
+  "envelope": { ... },          # snapshot of RiskEnvelope
+  "gpt_action": { ... }         # raw GPT action for logging
 }
+
+
 Execution engine must treat approved=False or side="flat" as “do nothing”.
 
 6. Phases & Tasks
-6.1 Phase 1 – Core Spine Hardening & Observability
-Status: ✅ Complete
+Phase 1 – Spine + Observability
 
-Highlights:
+Status: ✅ Complete & frozen
 
-Introduced run_id and snapshot_id plumbing and logging.
+run_id/snapshot_id plumbing.
 
-Implemented snapshot validation and state versioning in state_memory.py.
+Snapshot validation + state versioning.
 
-Hardened engine loop with safe error handling and timing probes.
+Hardened engine loop, timing probes.
 
-Ensured replay vs live parity path and cleaned up logging.
+Replay vs live parity and logging.
 
-(Phase 1 is frozen; only adjust if a serious bug is found.)
+Only change if serious bug.
 
-6.2 Phase 2 – GPT Policy + Risk Brain v1
-Status: 🚧 In progress
+Phase 2 – GPT Policy + Risk Brain v1
 
-Active tasks:
+Status: 🚧 In progress**
 
- Restore config.py and get pytest collecting tests without import errors.
-(We now have a stable baseline after the HL refactor; this unblocks all other work.)
+Key tasks:
 
- ✅ Lock GPT Action schema v1 in code and prompt
-(Ensure gpt_client.py and the brain prompt both enforce the action/size/confidence/rationale contract so future changes don't silently break parsing.)
-**Status:** Complete. Fixed inconsistency where brain.txt specified "rationale" but gpt_client.py parsed "notes". Now parses "rationale" with fallback to "notes" for compatibility. Verified end-to-end flow with tests.
+Restore config.py, get pytest collecting cleanly.
 
- Stabilize RiskEnvelope schema and validation
-(Align risk_envelope.py and risk_engine.py on the exact fields and make tests fail loudly if an envelope is missing or malformed.)
+Schema lock: GPT Action v1 enforced in gpt_client.py and brain prompt (done: rationale vs notes consistency).
 
- Implement unified Decision object through engine → risk → execution
-(Replace any ad‑hoc dicts with one normalized structure so logs, replay, and live runs all see the same decision shape.)
+Stabilize RiskEnvelope schema + validation in risk_envelope.py / risk_engine.py; tests must fail loudly on bad envelopes.
 
- Harden GPT JSON parsing + add tests
-(Update gpt_client.call_gpt to handle malformed responses gracefully and add tests so that any format drift is caught immediately.)
-**Progress:** Added tests for rationale/notes field parsing and end-to-end flow verification. General malformed response handling may need additional hardening.
+Implement unified Decision object engine → risk → execution (no ad‑hoc dicts in the spine).
 
- Ensure replay parity trace is implemented and tested
-(Have replay_engine emit a parity trace structure and make tests assert that live vs replay see identical decisions for the same data.)
+Harden GPT JSON parsing + tests for malformed responses.
 
- Expand and document snapshot schema in build_features.py
-(Make sure all required fields listed above are actually present and add tests so new features don’t break the snapshot shape.)
+Ensure replay parity trace exists and is tested (live vs replay same decisions on same data).
 
- Introduce Safe Mode for GPT failures
-(If GPT errors repeatedly, engine should switch into a “flat only” safe mode and log this state until manually cleared.)
+Expand + test snapshot schema in build_features.py to match section 5.1.
 
-When this phase is complete, the snapshot → GPT → risk → execution contract should be stable enough that Phase 3 (analytics/sweeps) can rely on it.
+✅ **Safe Mode for GPT failures**: When GPT returns 3+ consecutive errors within 5 minutes, the system automatically enters safe mode—skipping all GPT calls and forcing FLAT decisions with clear logging. Safe mode persists until manually cleared via `--clear-gpt-safe-mode` flag or by editing state. Error counts reset on successful GPT calls but do not auto-clear safe mode.
 
-6.3 Phase 3 – Research‑Grade Replay & Analytics
-Status: ⏳ Not started (planning only)
+When Phase 2 is done, snapshot → GPT → risk → execution should be stable enough for research sweeps.
 
-High‑level goals:
+Phase 3 – Replay & Analytics
+
+Status: ⏳ Planned**
 
 Multiple replay modes (single run, parameter sweeps, brain variants).
 
-Exportable results (CSV/JSON) for post‑analysis.
+Exportable results (CSV/JSON).
 
-Visualizations / summaries for equity curve, drawdown, regime performance.
+Summaries/plots for equity, drawdown, regime performance.
 
-Detailed tasks for Phase 3 will be defined after Phase 2 is locked.
+Phase 4 – Stateful GPT Agent
 
-6.4 Later Phases (stubs)
-Phase 4 – Stateful “Moving Picture” GPT Agent
-Add rolling memory and regime summaries for GPT while preserving v1 contract.
+Status: Stub**
+
+Rolling memory + regime summaries for GPT.
+
+Preserve v1 contracts while adding statefulness.
 
 Phase 5 – Hyperliquid SIM Integration
-**Status:** 🚧 Partially complete
-- ✅ Hyperliquid data adapter implemented (testnet/mainnet)
-- ✅ Hyperliquid testnet execution adapter implemented (market orders only, testnet-only, uses Wallet + Exchange pattern with HL_TESTNET_PRIVATE_KEY)
-- ⏳ Replay integration with Hyperliquid data adapter
-- ⏳ Mainnet execution adapter (currently disabled for safety)
 
-Phase 6 – Hyperliquid Testnet / Live under Strict Envelopes
-**Status:** ⏳ Not started
-- Add budget caps, daily loss limits, circuit breakers, and kill switch guarding all external orders.
-- Mainnet execution requires explicit approval and additional safety rails beyond testnet.
+Status: 🚧 Partial**
 
-7. Editing Policy (for Craftsman)
-Tier 1 files (core, high‑risk):
+✅ HL data adapter (testnet/mainnet).
+
+✅ HL testnet execution adapter (market‑only, Wallet+Exchange, HL_TESTNET_PRIVATE_KEY).
+
+⏳ Replay integration with HL data.
+
+⏳ Mainnet adapter (disabled until extra safety complete).
+
+Phase 6 – Hyperliquid Testnet / Live
+
+Status: ⏳ Not started**
+
+Hard budget caps, daily loss limits, circuit breakers, kill switch for all external orders.
+
+Mainnet requires explicit approval + extra safety rails.
+
+7. Editing Policy
+
+Tier 1 (core/high‑risk):
 engine.py, build_features.py, gatekeeper.py, gpt_client.py, risk_envelope.py, risk_engine.py, execution_engine.py, state_memory.py, replay_engine.py
-→ Prefer full‑file replacements when making non‑trivial changes. Keep structure clean.
+→ Prefer full‑file replacements for non‑trivial changes; keep structure clean.
 
-Tier 2 files (support/tests/utilities):
-config.py, adapters, tests under tests/, small utils
-→ Localized patches are allowed; still keep functions cohesive.
+Tier 2 (support/tests/utils):
+config.py, adapters/, tests/, small utils
+→ Local patches allowed; still keep functions cohesive.
 
-All changes must keep tests in tests/ passing or add/update tests as part of the same task.
+All changes must keep tests/ green or include updated tests in the same task.
 
-8. LLM Usage Notes
-When using LLMs with this repo:
+8. LLM Usage
 
-Always read TW_CANON.md and TW_LOG.md first and confirm “synced”.
+Always read TW_CANON.md + TW_LOG.md first and confirm they’re “synced”.
 
-Respect the invariants and contracts in this file; do not invent new architecture without an explicit Architect‑mode decision.
+Do not invent new architecture without explicit Architect instructions.
 
-Foreman‑mode should update the Phase/Tasks section here when tasks are completed or added.
+Foreman mode updates Phase/Tasks here when tasks complete or change.
 
-Craftsman should, when finished with a task, propose diff updates to this file (Phase/Tasks) and to TW_LOG.md summarizing what changed.
+Craftsman mode, after finishing a task:
 
----
+Propose updates to Phase/Tasks in this file.
 
-## 9. Standard Sync / “Commit and Push” Ritual
+Append a one‑line event to TW_LOG.md describing the change.
 
-When I say “commit and push” or “sync repos”, workers must follow this workflow unless explicitly told otherwise.
+9. Sync / “Commit and Push” Ritual
 
-### 9.1 Phase3-node (VPS → GitHub)
+When asked to “commit and push”, “sync repos”, etc., assume:
 
-Repository: `/root/tradewarrior_demo` on phase3-node.
-
-Standard sync command sequence:
-
-```bash
+9.1 VPS (phase3-node: /root/tradewarrior_demo)
 cd /root/tradewarrior_demo
 git status
 git add -A
 git commit -m "update from phase3-node" || echo "no changes to commit"
 git push origin main
-This stages all changes, creates a simple sync commit if needed, and pushes main to GitHub via SSH.
 
-9.2 Local Windows repo (GitHub → laptop)
-Repository: C:\Dev\tradewarrior_demo on my Windows laptop.
-
-Standard sync command sequence:
-
-powershell
-Copy code
+9.2 Local Windows (C:\Dev\tradewarrior_demo)
 cd C:\Dev\tradewarrior_demo
 git status
 git pull origin main
-This updates the local main branch to match GitHub (and therefore phase3-node).
 
-9.3 LLM Behavior Requirements
-When asked to “commit and push”, “sync repos”, or similar, assume this ritual by default.
+9.3 LLM behavior
 
-Ask for permission only when running important actions (e.g., destructive operations, force-push, stash/drop, or changing remotes).
+Ask for confirmation only for risky actions (force‑push, destructive ops, remotes).
 
-After any significant sync or code change, update TW_LOG.md with a new one-line event and ensure TW_CANON.md stays accurate if any contracts or invariants were touched.
+After significant sync/code changes:
+
+Update TW_LOG.md with a one‑liner.
+
+Ensure TW_CANON.md matches any changed contracts.
 
 This document is the single source of truth for how TradeWarrior is supposed to work.
