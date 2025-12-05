@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 from adapters.liqdata import HyperliquidDataAdapter, _normalize_symbol, _normalize_timeframe
 
-DEFAULT_OUT_PATH = Path("dumps/btcusdt_1m_30d.csv")
+DEFAULT_OUT_PATH = Path("dumps/hl_mainnet_btcusdt_1m_30d.csv")
 FIELDNAMES = ["timestamp", "open", "high", "low", "close", "volume"]
 DEFAULT_DAYS = 30
 DEFAULT_CHUNK = 1000  # candles per request window
@@ -95,17 +95,17 @@ def _fetch_range(
 
 
 def dump_candles(symbol: str, timeframe: str, days: int, chunk_size: int, out_path: Path) -> None:
-    adapter = HyperliquidDataAdapter(use_testnet=True)
+    adapter = HyperliquidDataAdapter(use_testnet=False)
     candles = _fetch_range(adapter, symbol, timeframe, days, chunk_size)
     if not candles:
-        raise SystemExit(f"No candles returned for {symbol} {timeframe} over {days}d (testnet).")
+        raise SystemExit(f"No candles returned for {symbol} {timeframe} over {days}d (mainnet).")
 
     _write_csv(candles, out_path)
     print(f"Wrote {len(candles)} candles for {symbol} {timeframe} to {out_path}")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dump Hyperliquid testnet candles to CSV.")
+    parser = argparse.ArgumentParser(description="Dump Hyperliquid mainnet candles to CSV.")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to fetch (default: BTCUSDT)")
     parser.add_argument("--timeframe", type=str, default="1m", help="Timeframe to fetch (default: 1m)")
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="Number of days to fetch (default: 30)")
@@ -119,7 +119,7 @@ def _parse_args() -> argparse.Namespace:
         "--out",
         type=str,
         default=str(DEFAULT_OUT_PATH),
-        help="Output CSV path (default: dumps/btcusdt_1m_30d.csv)",
+        help="Output CSV path (default: dumps/hl_mainnet_btcusdt_1m_30d.csv)",
     )
     return parser.parse_args()
 

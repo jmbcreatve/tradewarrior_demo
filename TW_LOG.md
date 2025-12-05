@@ -36,3 +36,4 @@ Each line should be one clear event; details belong in commits and TW_CANON.md.
 - 2025-12-05 – Removed `local_env.txt` from all code paths so secrets come solely from OS environment/config; dropped the file, left it gitignored, and validated with pytest plus run_testnet --once --dry-run smoke.
 - 2025-12-05 – Added Hyperliquid candle dump helper (scripts/dump_hl_candles.py) and replay_engine --candles-csv option to load CSV candles into the existing snapshot/spine replay loop.
 - 2025-12-05 – Added detailed logging to HyperliquidTestnetExecutionAdapter.health_check to surface SDK/credential initialization failures during testnet runs.
+- 2025-12-05 – Enhanced dump_hl_candles to loop Hyperliquid candles API for ~30 days of 1m data and write a single CSV for analytics.

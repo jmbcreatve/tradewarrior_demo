@@ -108,6 +108,19 @@ def _check_daily_loss_limit(
     return daily_pnl_fraction <= -max_daily_loss_pct
 
 
+def _is_replay_mode(state: Dict[str, Any], config: Config) -> bool:
+    """Detect whether we are running inside replay (backtest) mode."""
+    try:
+        if bool(state.get("replay_mode")):
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(getattr(config, "replay_mode", False))
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Core risk engine
 # ---------------------------------------------------------------------------
@@ -391,6 +404,14 @@ def evaluate_risk(
 
     effective_risk_pct = _clamp(risk_pct * regime_mult, 0.0, allowed_risk_pct)
 
+    if _is_replay_mode(state, config) and effective_risk_pct > 0.0 and regime_mult > 0.0:
+        replay_floor = max(_get_float(vars(config), "replay_risk_floor_pct", 0.0), 0.0)
+        replay_cap = max(_get_float(vars(config), "replay_risk_cap_pct", allowed_risk_pct), 0.0)
+        upper_bound = min(replay_cap if replay_cap > 0.0 else allowed_risk_pct, allowed_risk_pct)
+        floor_bound = min(replay_floor, upper_bound)
+        if upper_bound > 0.0 and floor_bound > 0.0:
+            effective_risk_pct = _clamp(max(effective_risk_pct, floor_bound), 0.0, upper_bound)
+
     if effective_risk_pct <= 0.0:
         logger.info(
             "Risk: effective risk zero (risk_pct=%.4f, regime_mult=%.3f, vol=%s, "
@@ -464,6 +485,14 @@ def evaluate_risk(
 
     # Global notional cap: never risk more than X% equity notionally.
     max_notional_pct = 0.05
+    if _is_replay_mode(state, config):
+        max_notional_pct = max(
+            max_notional_pct,
+            _get_float(vars(config), "replay_notional_cap_pct", max_notional_pct),
+        )
+        if stop_pct > 0:
+            target_notional_pct = effective_risk_pct / stop_pct
+            max_notional_pct = max(max_notional_pct, target_notional_pct)
     notional = price * qty
     cfg_notional_cap = equity * max_notional_pct * leverage
     overall_notional_cap = min(cfg_notional_cap, env_max_notional)

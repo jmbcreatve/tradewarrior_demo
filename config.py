@@ -40,6 +40,11 @@ class Config:
     risk_per_trade: float = 0.005  # Risk per trade as fraction of equity (0.5% default)
     max_leverage: float = 3.0  # Maximum leverage multiplier
     max_leverage_10x_mode: float = 10.0  # Maximum leverage in aggressive mode
+    # Replay-only risk tuning (ignored in live/testnet). Lets us size replays meaningfully.
+    replay_risk_floor_pct: float = 0.02  # 2% floor for replay sizing
+    replay_risk_cap_pct: float = 0.05    # 5% cap for replay sizing
+    replay_notional_cap_pct: float = 10.0  # Allow larger notionals in replay so risk_pct can express
+    replay_mode: bool = False            # Flag set by replay_engine to enable replay-only risk tweaks
 
     # Account / equity
     initial_equity: float = 10_000.0  # Starting equity for position sizing and state initialization

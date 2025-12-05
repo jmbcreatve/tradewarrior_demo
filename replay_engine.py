@@ -248,9 +248,15 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     The same gatekeeper → GPT → risk → execution path as live engine,
     but with a replay execution adapter and optional GPT stub.
     """
+    config.replay_mode = True
+    try:
+        config.risk_per_trade = max(config.risk_per_trade, getattr(config, "replay_risk_cap_pct", config.risk_per_trade))
+    except Exception:
+        pass
     state = load_state(config)
     # Start from a clean, in-memory state so replay does not mutate live files.
     state["symbol"] = config.symbol
+    state["replay_mode"] = True
     state["equity"] = _safe_float(state.get("equity", 10_000.0), 10_000.0)
     state["max_drawdown"] = 0.0
     state["open_positions_summary"] = []

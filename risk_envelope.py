@@ -44,6 +44,8 @@ def compute_risk_envelope(
 
     base_max_leverage = max(_safe_float(getattr(config, "max_leverage", 0.0)), 0.0)
     base_risk_pct = max(_safe_float(getattr(config, "risk_per_trade", 0.0)), 0.0)
+    replay_mode = bool(getattr(config, "replay_mode", False))
+    replay_notional_cap_pct = _safe_float(getattr(config, "replay_notional_cap_pct", 0.0), 0.0) if replay_mode else 0.0
 
     effective_leverage = base_max_leverage
     effective_risk_pct = base_risk_pct
@@ -89,6 +91,8 @@ def compute_risk_envelope(
 
     equity_value = max(_safe_float(equity, 0.0), 0.0)
     max_notional = equity_value * effective_leverage
+    if replay_mode and replay_notional_cap_pct > 0.0:
+        max_notional = max(max_notional, equity_value * replay_notional_cap_pct)
 
     # Base stop distances (fractions of price).
     min_stop_pct = 0.005  # 0.5%
