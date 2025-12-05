@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -449,6 +450,14 @@ if __name__ == "__main__":
 
     candle_path = args.candles_csv or args.file
     if candle_path:
+        lower_path = candle_path.lower()
+        if any(tag in lower_path for tag in ("testnet", "hl_testnet")):
+            print(
+                f"Replay aborted: candles path looks like testnet data ({candle_path}). "
+                "Use a mainnet tape instead."
+            )
+            sys.exit(1)
+        logger.info("Replay mode: offline, source=%s", candle_path)
         candles = load_candles(candle_path)
     else:
         candles = generate_mock_candles(cfg.symbol, cfg.timeframe, limit=args.limit, start_price=args.start_price)
