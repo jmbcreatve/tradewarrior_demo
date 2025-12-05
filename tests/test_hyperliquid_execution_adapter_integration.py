@@ -1,4 +1,4 @@
-"""Integration tests for HyperliquidExecutionAdapter with real testnet API.
+"""Integration tests for HyperliquidTestnetExecutionAdapter with real testnet API.
 
 These tests require:
 - HL_TESTNET_PRIVATE_KEY environment variable
@@ -14,7 +14,7 @@ Or set environment variable:
 import os
 import pytest
 
-from adapters.liqexec import HyperliquidExecutionAdapter
+from adapters.liqexec import HyperliquidTestnetExecutionAdapter
 
 
 # Skip all tests in this file unless explicitly enabled
@@ -32,7 +32,7 @@ def testnet_adapter():
     if not key:
         pytest.skip("Missing HL_TESTNET_PRIVATE_KEY")
     
-    adapter = HyperliquidExecutionAdapter(use_testnet=True)
+    adapter = HyperliquidTestnetExecutionAdapter(use_testnet=True)
     
     if not adapter.health_check():
         pytest.skip("Hyperliquid testnet adapter health check failed")
@@ -121,4 +121,3 @@ class TestHyperliquidExecutionAdapterIntegration:
         
         assert result["status"] == "no_trade"
         assert result["reason"] == "invalid_size"
-

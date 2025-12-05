@@ -1,6 +1,8 @@
 import json
 import re
 
+import pytest
+
 from config import Config
 from enums import Side
 from risk_engine import evaluate_risk, _check_daily_loss_limit
@@ -84,6 +86,61 @@ def test_risk_envelope_shrinks_large_proposal():
     stop_pct = 0.005  # normal vol stop
     risk_pct = (notional * stop_pct) / (decision.leverage * state["equity"])
     assert risk_pct <= snapshot["risk_envelope"]["max_risk_per_trade_pct"] + 1e-6
+
+
+def test_stop_distance_respects_envelope_min_max():
+    config = Config(risk_per_trade=0.01, max_leverage=3.0)
+    snapshot = {
+        "price": 100.0,
+        "volatility_mode": "normal",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.02,
+            "max_leverage": 3.0,
+            "max_notional": 100_000.0,
+            "min_stop_distance_pct": 0.02,  # force wider than vol-based stop
+            "max_stop_distance_pct": 0.03,
+            "max_daily_loss_pct": 0.03,
+        },
+    }
+    state = {"equity": 10_000}
+
+    decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=1.0), state, config)
+
+    assert decision.approved is True
+    expected_stop_distance = snapshot["price"] * 0.02  # clamped up to envelope min
+    assert decision.stop_loss_price == pytest.approx(snapshot["price"] - expected_stop_distance)
+    assert decision.take_profit_price == pytest.approx(snapshot["price"] + 2 * expected_stop_distance)
+
+
+def test_stop_distance_clamped_to_max_when_vol_wide():
+    config = Config(risk_per_trade=0.01, max_leverage=3.0)
+    snapshot = {
+        "price": 200.0,
+        "volatility_mode": "explosive",
+        "range_position": "mid",
+        "timing_state": "normal",
+        "danger_mode": False,
+        "risk_envelope": {
+            "max_risk_per_trade_pct": 0.02,
+            "max_leverage": 5.0,
+            "max_notional": 200_000.0,
+            "min_stop_distance_pct": 0.001,
+            "max_stop_distance_pct": 0.003,  # cap the wide vol stop
+            "max_daily_loss_pct": 0.03,
+        },
+    }
+    state = {"equity": 20_000}
+
+    decision = evaluate_risk(snapshot, GptDecision(action="long", confidence=0.9), state, config)
+
+    assert decision.approved is True
+    expected_stop_pct = 0.003  # clamped down to envelope max
+    expected_stop_distance = snapshot["price"] * expected_stop_pct
+    assert decision.stop_loss_price == pytest.approx(snapshot["price"] - expected_stop_distance)
+    assert decision.take_profit_price == pytest.approx(snapshot["price"] + 2 * expected_stop_distance)
 
 
 def test_risk_envelope_blocks_when_zeroed():

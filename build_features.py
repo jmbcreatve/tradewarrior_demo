@@ -483,18 +483,36 @@ def _build_risk_context(state: Dict[str, Any], config: Config | None = None) -> 
     ops = state.get("open_positions_summary", [])
     risk["open_positions_summary"] = ops if isinstance(ops, list) else []
 
-    last_decision = state.get("last_gpt_decision") or {}
-    last_action = last_decision.get("action", state.get("last_action", "flat"))
-    if not isinstance(last_action, str) or not last_action:
-        last_action = "flat"
-    risk["last_action"] = last_action
-
+    # Derive last action/confidence from the last execution/risk outcome (not raw GPT)
     try:
-        last_conf = float(
-            last_decision.get("confidence", state.get("last_confidence", 0.0)) or 0.0
-        )
+        last_conf = float(state.get("last_confidence", 0.0) or 0.0)
     except (TypeError, ValueError):
         last_conf = 0.0
+
+    last_action_state = state.get("last_action")
+    last_action = str(last_action_state) if isinstance(last_action_state, str) else ""
+
+    # Fallback to last execution result if state.last_action is missing
+    if not last_action:
+        last_exec = state.get("last_execution_result") or {}
+        if isinstance(last_exec, dict):
+            status = str(last_exec.get("status", "")).lower()
+            side = last_exec.get("side", "")
+            if side and status not in {"no_trade", "skipped", "gatekeeper_skipped", "safe_mode_flat", "dry_run"}:
+                last_action = str(side)
+
+    # Fallback to last risk decision if still empty
+    if not last_action:
+        last_risk_decision = state.get("last_risk_decision") or {}
+        if isinstance(last_risk_decision, dict):
+            side = last_risk_decision.get("side", "")
+            if side and last_risk_decision.get("approved", False):
+                last_action = str(side)
+
+    if not last_action:
+        last_action = "flat"
+
+    risk["last_action"] = last_action
     risk["last_confidence"] = last_conf
 
     return risk

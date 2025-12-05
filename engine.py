@@ -174,6 +174,8 @@ def run_spine_tick(
         
         state["last_risk_decision"] = risk_decision.to_dict()
         result.execution_status = "safe_mode_flat"
+        state["last_action"] = risk_decision.side if risk_decision.approved else "flat"
+        state["last_confidence"] = 0.0
         
         logger.warning(
             "SpineTick: GPT SAFE MODE ACTIVE - skipping GPT, forcing FLAT."
@@ -198,6 +200,17 @@ def run_spine_tick(
     
     state["last_gpt_decision"] = gpt_decision.to_dict()
     state["gpt_state_note"] = gpt_decision.notes
+    try:
+        state["last_gpt_call_ts"] = float(snapshot.get("timestamp") or time.time())
+    except (TypeError, ValueError):
+        state["last_gpt_call_ts"] = 0.0
+    try:
+        equity_for_gpt = float(state.get("equity", getattr(config, "initial_equity", 0.0)) or getattr(config, "initial_equity", 0.0))
+    except (TypeError, ValueError):
+        equity_for_gpt = getattr(config, "initial_equity", 0.0)
+    state["last_gpt_equity"] = equity_for_gpt
+    state["trades_since_last_gpt"] = 0
+    state["last_gpt_snapshot"] = snapshot
     
     # --- Risk evaluation ---
     risk_decision = evaluate_risk(snapshot, gpt_decision, state, config)
@@ -217,6 +230,27 @@ def run_spine_tick(
     result.execution_status = execution_result.get("status", "unknown")
     result.fill_price = execution_result.get("fill_price") or execution_result.get("avg_fill_price")
     result.realized_pnl = execution_result.get("realized_pnl")
+    exec_status = str(result.execution_status or "").lower()
+    non_trade_statuses = {"no_trade", "skipped", "gatekeeper_skipped", "safe_mode_flat", "dry_run"}
+    trade_executed = (
+        risk_decision.approved
+        and risk_decision.position_size > 0
+        and exec_status not in non_trade_statuses
+    )
+    if trade_executed:
+        try:
+            trades_since = int(state.get("trades_since_last_gpt", 0) or 0)
+        except (TypeError, ValueError):
+            trades_since = 0
+        state["trades_since_last_gpt"] = trades_since + 1
+        state["last_action"] = risk_decision.side
+        try:
+            state["last_confidence"] = float(getattr(gpt_decision, "confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            state["last_confidence"] = 0.0
+    else:
+        state["last_action"] = "flat"
+        state["last_confidence"] = 0.0
     
     logger.info(
         "SpineTick: gpt_action=%s, approved=%s, side=%s, size=%.6f, status=%s",

@@ -232,7 +232,7 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
             # Set leverage if provided
             if leverage is not None and leverage > 0:
                 try:
-                    lev_result = self._exchange.update_leverage(leverage, hl_symbol)
+                    lev_result = self._exchange.update_leverage(int(leverage), hl_symbol)
                     if not lev_result.get("status") == "ok":
                         logger.warning(
                             "HyperliquidTestnetExecutionAdapter: Failed to set leverage %s: %s",
@@ -247,9 +247,9 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
             # Hyperliquid uses "B" for buy (long) and "A" for sell (short)
             is_buy = side_norm == "long"
             
-            # Market order specification
-            order_result = self._exchange.market_order(
-                coin=hl_symbol,
+            # Market order specification (aggressive limit IoC)
+            order_result = self._exchange.market_open(
+                name=hl_symbol,
                 is_buy=is_buy,
                 sz=trade_size,
             )
@@ -314,14 +314,43 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
                     symbol, side, trade_size, avg_fill_price
                 )
                 
-                # Note: Stop loss and take profit would need to be set as separate orders
-                # For now, we log them but don't automatically place them
+                # Place protective orders (stop loss / take profit) as grouped triggers
                 if stop_loss is not None or take_profit is not None:
-                    logger.info(
-                        "HyperliquidTestnetExecutionAdapter: Note - stop_loss=%s and take_profit=%s "
-                        "are logged but not automatically placed as separate orders",
-                        stop_loss, take_profit
-                    )
+                    try:
+                        protective_resp = self._place_protective_orders(
+                            hl_symbol=hl_symbol,
+                            side_norm=side_norm,
+                            trade_size=trade_size,
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                        )
+                        if protective_resp is not None:
+                            result["protective_orders"] = protective_resp
+                    except Exception as protect_err:
+                        logger.error(
+                            "HyperliquidTestnetExecutionAdapter: Protective order placement failed for %s %s: %s",
+                            symbol,
+                            side,
+                            protect_err,
+                            exc_info=True,
+                        )
+                        try:
+                            flatten_resp = self._exchange.market_close(hl_symbol, sz=trade_size)
+                        except Exception as close_err:
+                            logger.critical(
+                                "HyperliquidTestnetExecutionAdapter: Failed to flatten after protective order failure: %s",
+                                close_err,
+                                exc_info=True,
+                            )
+                            flatten_resp = {"status": "error", "error": str(close_err)}
+
+                        result.update({
+                            "status": "no_trade",
+                            "reason": "protective_order_failure",
+                            "protective_orders": {"status": "failed"},
+                            "flatten_result": flatten_resp,
+                        })
+                        return result
                 
             elif "resting" in filled_status:
                 # Order is resting (limit order, not filled immediately)
@@ -351,17 +380,82 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
             result["reason"] = f"exception: {str(e)}"
             return result
 
+    def _place_protective_orders(
+        self,
+        hl_symbol: str,
+        side_norm: str,
+        trade_size: float,
+        stop_loss: Optional[float],
+        take_profit: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Submit stop-loss / take-profit as grouped trigger orders (OCO style).
+        """
+        if stop_loss is None and take_profit is None:
+            return None
+
+        reduce_only = True
+        close_is_buy = side_norm == "short"
+        orders: List[Dict[str, Any]] = []
+
+        if stop_loss is not None:
+            sl_px = float(stop_loss)
+            orders.append({
+                "coin": hl_symbol,
+                "is_buy": close_is_buy,
+                "sz": trade_size,
+                "limit_px": sl_px,
+                "order_type": {"trigger": {"triggerPx": sl_px, "isMarket": True, "tpsl": "sl"}},
+                "reduce_only": reduce_only,
+            })
+
+        if take_profit is not None:
+            tp_px = float(take_profit)
+            orders.append({
+                "coin": hl_symbol,
+                "is_buy": close_is_buy,
+                "sz": trade_size,
+                "limit_px": tp_px,
+                "order_type": {"trigger": {"triggerPx": tp_px, "isMarket": True, "tpsl": "tp"}},
+                "reduce_only": reduce_only,
+            })
+
+        try:
+            resp = self._exchange.bulk_orders(orders, grouping="normalTpsl")
+        except Exception as e:
+            raise RuntimeError(f"protective_order_exception: {e}") from e
+
+        if not resp or resp.get("status") != "ok":
+            raise RuntimeError(f"protective_order_rejected: {resp}")
+
+        return resp
+
     def cancel_all_orders(self, symbol: str) -> None:
         """
         Cancel all open orders for a symbol on Hyperliquid testnet.
         """
-        if self._exchange is None:
+        if self._exchange is None or self._info is None:
             logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot cancel orders")
             return
         
         try:
             hl_symbol = _normalize_symbol(symbol)
-            result = self._exchange.cancel(hl_symbol)
+            account_address = getattr(self._account, "address", None)
+            if not account_address:
+                logger.warning("HyperliquidTestnetExecutionAdapter: Account not available, cannot cancel orders")
+                return
+
+            open_orders = self._info.frontend_open_orders(account_address) or []
+            cancels = []
+            for order in open_orders:
+                if str(order.get("coin")) == hl_symbol and "oid" in order:
+                    cancels.append({"coin": hl_symbol, "oid": order["oid"]})
+
+            if not cancels:
+                logger.info("HyperliquidTestnetExecutionAdapter: No open orders to cancel for %s", symbol)
+                return
+
+            result = self._exchange.bulk_cancel(cancels)
             
             if result.get("status") == "ok":
                 logger.info("HyperliquidTestnetExecutionAdapter: Cancelled all orders for %s", symbol)
@@ -402,3 +496,7 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
         except Exception as e:
             logger.warning(f"HyperliquidTestnetExecutionAdapter health check failed: {e}")
             return False
+
+
+# Backwards compatibility alias for legacy imports
+HyperliquidExecutionAdapter = HyperliquidTestnetExecutionAdapter

@@ -415,8 +415,23 @@ def evaluate_risk(
         return decision
 
     # --- Position sizing ------------------------------------------------------
-    stop_pct = _vol_stop_pct(vol_enum)
-    stop_pct = max(stop_pct, 0.001)  # floor at 0.1%
+    raw_stop_pct = _vol_stop_pct(vol_enum)
+    stop_pct = max(raw_stop_pct, 0.001)  # floor at 0.1%
+    try:
+        env_min_stop = float(getattr(effective_env, "min_stop_distance_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        env_min_stop = 0.0
+    try:
+        env_max_stop = float(getattr(effective_env, "max_stop_distance_pct", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        env_max_stop = 0.0
+
+    if env_min_stop > 0.0 and env_max_stop > 0.0:
+        stop_pct = _clamp(stop_pct, env_min_stop, env_max_stop)
+    elif env_max_stop > 0.0:
+        stop_pct = min(stop_pct, env_max_stop)
+    elif env_min_stop > 0.0:
+        stop_pct = max(stop_pct, env_min_stop)
 
     dollar_risk = equity * effective_risk_pct
 
