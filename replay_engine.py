@@ -413,6 +413,12 @@ def _print_summary(stats: Dict[str, Any]) -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TradeWarrior replay/backtest harness")
     parser.add_argument("--file", type=str, help="Path to candle JSON/CSV file")
+    parser.add_argument(
+        "--candles-csv",
+        type=str,
+        default=None,
+        help="Path to a candles CSV (timestamp,open,high,low,close,volume).",
+    )
     parser.add_argument("--limit", type=int, default=300, help="Number of candles to generate when using mock data")
     parser.add_argument("--start-price", type=float, default=30_000.0, help="Starting price for mock data generation")
     parser.add_argument("--stub", action="store_true", help="Use deterministic GPT stub instead of live GPT")
@@ -435,8 +441,9 @@ if __name__ == "__main__":
     args = _parse_args()
     cfg = load_config()
 
-    if args.file:
-        candles = load_candles(args.file)
+    candle_path = args.candles_csv or args.file
+    if candle_path:
+        candles = load_candles(candle_path)
     else:
         candles = generate_mock_candles(cfg.symbol, cfg.timeframe, limit=args.limit, start_price=args.start_price)
 

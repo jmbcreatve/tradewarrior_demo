@@ -94,3 +94,4 @@ Typical safe loop:
 5. `git add -A && git commit -m "short message" && git push origin main`
 
 Any agent asked to “edit code” should assume this workflow and not run git commands itself.
+`

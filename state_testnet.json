@@ -1,26 +1,36 @@
 {
   "daily_pnl": 0.0,
   "daily_start_equity": 1000.0,
-  "daily_start_timestamp": 1764822189.9131727,
+  "daily_start_timestamp": 1764908550.1942687,
   "equity": 1000.0,
   "gpt_call_timestamps": [
-    1764827340.0
+    1764911580.0,
+    1764912180.0,
+    1764914040.0
   ],
-  "gpt_state_note": "Downtrend with extreme_low range position and low volatility suggests mean reversion potential, but microstructure shows no clear bias or impulse. Recent price path is choppy. Fib zones are discount but no strong structure to support a countertrend long. Risk context and cautious timing favors staying flat.",
+  "gpt_error_count": 0,
+  "gpt_safe_mode": false,
+  "gpt_state_note": "Sideways trend with low range position and low shape score; recent price path shows chop, and risk context is mild. Staying defensive and flat.",
+  "last_action": "flat",
+  "last_confidence": 0.0,
   "last_decision": null,
   "last_envelope": null,
   "last_execution_result": {
-    "reason": "gpt_flat",
+    "fill_price": null,
+    "position_size": 0.0,
+    "realized_pnl": null,
+    "side": "flat",
     "status": "no_trade"
   },
-  "last_gpt_call_ts": null,
-  "last_gpt_call_walltime": 1764827340.0,
+  "last_gpt_call_ts": 1764914040.0,
+  "last_gpt_call_walltime": 1764914040.0,
   "last_gpt_decision": {
     "action": "flat",
     "confidence": 0.25,
-    "notes": "Downtrend with extreme_low range position and low volatility suggests mean reversion potential, but microstructure shows no clear bias or impulse. Recent price path is choppy. Fib zones are discount but no strong structure to support a countertrend long. Risk context and cautious timing favors staying flat."
+    "notes": "Sideways trend with low range position and low shape score; recent price path shows chop, and risk context is mild. Staying defensive and flat."
   },
-  "last_gpt_equity": 0.0,
+  "last_gpt_equity": 1000.0,
+  "last_gpt_error_timestamp": 1764912230.8321843,
   "last_gpt_snapshot": {
     "danger_mode": false,
     "fib_context": {
@@ -28,20 +38,20 @@
       "micro_zone": "micro_discount"
     },
     "flow": {
-      "funding": -0.000406299,
-      "open_interest": 37.5035,
-      "skew": -0.0037974139,
+      "funding": -0.0002352518,
+      "open_interest": 41.27128,
+      "skew": -0.0026444896,
       "skew_bias": "unknown",
       "skew_bias_hint": "neutral"
     },
-    "gpt_state_note": "error fallback",
+    "gpt_state_note": "error fallback: Invalid response object from API: '{\\n  \"error\": {\\n    \"message\": \"Incorrect API key provided: sk-proj-*********************************************************************************************************************************************************NYA0. You can find your API key at https://platform.openai.com/account/api-keys.\",\\n    \"type\": \"invalid_request_error\",\\n    \"code\": \"invalid_api_key\",\\n    \"param\": null\\n  }\\n}' (HTTP response code was 401)",
     "htf_context": {
       "range_pos_1h": "mid",
       "trend_1h": "unknown"
     },
     "liquidity_context": {
-      "liquidity_above": 92606.0,
-      "liquidity_below": null
+      "liquidity_above": 91690.0,
+      "liquidity_below": 91668.0
     },
     "market_session": "ASIA",
     "microstructure": {
@@ -55,23 +65,23 @@
       "fract_high": false,
       "fract_low": false,
       "fvg_down": false,
-      "fvg_up": false,
-      "order_block_bias": "none",
-      "shape_bias": "none",
-      "shape_score": 0.0,
+      "fvg_up": true,
+      "order_block_bias": "bull",
+      "shape_bias": "bull",
+      "shape_score": 0.25,
       "sweep_down": false,
       "sweep_up": false,
       "wick_exhaustion_down": false,
       "wick_exhaustion_up": false
     },
-    "price": 92541.0,
-    "range_position": "extreme_low",
+    "price": 91673.0,
+    "range_position": "low",
     "recent_price_path": {
       "impulse_state": "chop",
       "lookback_bars": 100,
-      "ret_1": -0.0002808776345781974,
-      "ret_15": -0.0018444214341185607,
-      "ret_5": -0.0008960960442217999
+      "ret_1": 0.00020730137255329828,
+      "ret_15": -0.0004579403587199477,
+      "ret_5": 4.363525292083474e-05
     },
     "risk_context": {
       "equity": 1000.0,
@@ -91,16 +101,16 @@
     },
     "run_id": "2da4206785c04b0ea24826a43e8fb4ed",
     "since_last_gpt": {
-      "equity_change_since_last_gpt": 1000.0,
-      "price_change_pct_since_last_gpt": -0.005288446035277805,
-      "time_since_last_gpt_sec": 0.0,
+      "equity_change_since_last_gpt": 0.0,
+      "price_change_pct_since_last_gpt": -0.0006649660976301044,
+      "time_since_last_gpt_sec": 1860.0,
       "trades_since_last_gpt": 0
     },
-    "snapshot_id": 254,
+    "snapshot_id": 258,
     "symbol": "BTCUSDT",
-    "timestamp": 1764827340.0,
+    "timestamp": 1764914040.0,
     "timing_state": "cautious",
-    "trend": "down",
+    "trend": "sideways",
     "volatility_mode": "low"
   },
   "last_risk_decision": {
@@ -122,20 +132,20 @@
       "micro_zone": "micro_discount"
     },
     "flow": {
-      "funding": -0.000406299,
-      "open_interest": 37.5035,
-      "skew": -0.0037974139,
+      "funding": -0.0002352518,
+      "open_interest": 41.27128,
+      "skew": -0.0026444896,
       "skew_bias": "unknown",
       "skew_bias_hint": "neutral"
     },
-    "gpt_state_note": "error fallback",
+    "gpt_state_note": "error fallback: Invalid response object from API: '{\\n  \"error\": {\\n    \"message\": \"Incorrect API key provided: sk-proj-*********************************************************************************************************************************************************NYA0. You can find your API key at https://platform.openai.com/account/api-keys.\",\\n    \"type\": \"invalid_request_error\",\\n    \"code\": \"invalid_api_key\",\\n    \"param\": null\\n  }\\n}' (HTTP response code was 401)",
     "htf_context": {
       "range_pos_1h": "mid",
       "trend_1h": "unknown"
     },
     "liquidity_context": {
-      "liquidity_above": 92606.0,
-      "liquidity_below": null
+      "liquidity_above": 91690.0,
+      "liquidity_below": 91668.0
     },
     "market_session": "ASIA",
     "microstructure": {
@@ -149,23 +159,23 @@
       "fract_high": false,
       "fract_low": false,
       "fvg_down": false,
-      "fvg_up": false,
-      "order_block_bias": "none",
-      "shape_bias": "none",
-      "shape_score": 0.0,
+      "fvg_up": true,
+      "order_block_bias": "bull",
+      "shape_bias": "bull",
+      "shape_score": 0.25,
       "sweep_down": false,
       "sweep_up": false,
       "wick_exhaustion_down": false,
       "wick_exhaustion_up": false
     },
-    "price": 92541.0,
-    "range_position": "extreme_low",
+    "price": 91673.0,
+    "range_position": "low",
     "recent_price_path": {
       "impulse_state": "chop",
       "lookback_bars": 100,
-      "ret_1": -0.0002808776345781974,
-      "ret_15": -0.0018444214341185607,
-      "ret_5": -0.0008960960442217999
+      "ret_1": 0.00020730137255329828,
+      "ret_15": -0.0004579403587199477,
+      "ret_5": 4.363525292083474e-05
     },
     "risk_context": {
       "equity": 1000.0,
@@ -185,20 +195,20 @@
     },
     "run_id": "2da4206785c04b0ea24826a43e8fb4ed",
     "since_last_gpt": {
-      "equity_change_since_last_gpt": 1000.0,
-      "price_change_pct_since_last_gpt": -0.005288446035277805,
-      "time_since_last_gpt_sec": 0.0,
+      "equity_change_since_last_gpt": 0.0,
+      "price_change_pct_since_last_gpt": -0.0006649660976301044,
+      "time_since_last_gpt_sec": 1860.0,
       "trades_since_last_gpt": 0
     },
-    "snapshot_id": 254,
+    "snapshot_id": 258,
     "symbol": "BTCUSDT",
-    "timestamp": 1764827340.0,
+    "timestamp": 1764914040.0,
     "timing_state": "cautious",
-    "trend": "down",
+    "trend": "sideways",
     "volatility_mode": "low"
   },
   "run_id": "2da4206785c04b0ea24826a43e8fb4ed",
-  "snapshot_id": 254,
+  "snapshot_id": 258,
   "state_version": 1,
   "symbol": "BTCUSDT",
   "trades_since_last_gpt": 0,

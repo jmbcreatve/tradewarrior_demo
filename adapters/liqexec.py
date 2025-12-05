@@ -481,20 +481,33 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
         - Can successfully query user state
         """
         if not HL_SDK_AVAILABLE:
+            logger.error("HyperliquidTestnetExecutionAdapter health check failed: SDK not available")
             return False
         
         if self._exchange is None or self._info is None:
+            logger.error(
+                "HyperliquidTestnetExecutionAdapter health check failed: exchange/info not initialized "
+                "(exchange=%s, info=%s)",
+                bool(self._exchange),
+                bool(self._info),
+            )
             return False
         
         try:
             # Try to fetch user state as a health check
             if self._account is None:
+                logger.error("HyperliquidTestnetExecutionAdapter health check failed: account not initialized")
                 return False
             account_address = self._account.address
             user_state = self._info.user_state(account_address)
             return user_state is not None
         except Exception as e:
-            logger.warning(f"HyperliquidTestnetExecutionAdapter health check failed: {e}")
+            logger.error(
+                "HyperliquidTestnetExecutionAdapter health check exception for account %s: %s",
+                getattr(self._account, "address", None),
+                e,
+                exc_info=True,
+            )
             return False
 
 
