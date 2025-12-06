@@ -5,8 +5,9 @@ import csv
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 
 from adapters.base_execution_adapter import BaseExecutionAdapter
 from adapters.mock_data_adapter import MockDataAdapter
@@ -14,7 +15,7 @@ from build_features import build_snapshot
 from config import Config, load_config
 from gpt_client import call_gpt
 from logger_utils import get_logger
-from replay_gpt_stub import generate_stub_decision
+from replay_gpt_stub import generate_stub_decision, generate_stub_decision_v2
 from state_memory import load_state
 from schemas import GptDecision
 
@@ -164,19 +165,63 @@ def generate_mock_candles(symbol: str, timeframe: str, limit: int = 300, start_p
     return adapter.fetch_recent_candles(symbol=symbol, timeframe=timeframe, limit=limit)
 
 
+def _serialize_config(cfg: Config) -> Dict[str, Any]:
+    """Convert Config dataclass to JSON-safe dict."""
+    payload: Dict[str, Any] = {}
+    for key, value in vars(cfg).items():
+        if hasattr(value, "value"):
+            payload[key] = value.value
+        elif isinstance(value, (list, tuple, set)):
+            payload[key] = list(value)
+        else:
+            payload[key] = value
+    return payload
+
+
+def _extract_features(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull a compact feature set from a snapshot."""
+    rpp = snapshot.get("recent_price_path") or {}
+    micro = snapshot.get("microstructure") or {}
+    return {
+        "snapshot_id": snapshot.get("snapshot_id"),
+        "timestamp": snapshot.get("timestamp"),
+        "price": snapshot.get("price"),
+        "trend": snapshot.get("trend"),
+        "range_position": snapshot.get("range_position"),
+        "volatility_mode": snapshot.get("volatility_mode"),
+        "market_session": snapshot.get("market_session"),
+        "timing_state": snapshot.get("timing_state"),
+        "ret_1": rpp.get("ret_1"),
+        "ret_5": rpp.get("ret_5"),
+        "ret_15": rpp.get("ret_15"),
+        "impulse_state": rpp.get("impulse_state"),
+        "shape_bias": micro.get("shape_bias"),
+        "shape_score": micro.get("shape_score"),
+    }
+
+
 def _write_replay_exports(
     result: Dict[str, Any],
     config: Config,
     out_dir: str,
+    run_id: str,
+    parity_trace: List[Dict[str, Any]],
+    features_entry: List[Dict[str, Any]],
+    features_exit: List[Dict[str, Any]],
+    source_path: Optional[str],
+    stub_used: bool,
 ) -> None:
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
+    out_root = Path(out_dir)
+    run_path = out_root / "runs" / run_id
+    run_path.mkdir(parents=True, exist_ok=True)
 
-    symbol = str(getattr(config, "symbol", "unknown"))
-    timeframe = str(getattr(config, "timeframe", "unknown"))
-
-    trades_path = out_path / f"trades_{symbol}_{timeframe}.csv"
-    equity_path = out_path / f"equity_{symbol}_{timeframe}.csv"
+    trades_path = run_path / "trades.csv"
+    equity_path = run_path / "equity.csv"
+    parity_path = run_path / "parity.jsonl"
+    features_entry_path = run_path / "features_at_entry.csv"
+    features_exit_path = run_path / "features_at_exit.csv"
+    config_path = run_path / "run_config.json"
+    summary_path = run_path / "summary.json"
 
     trade_fields = [
         "side",
@@ -220,17 +265,76 @@ def _write_replay_exports(
         for idx, equity in enumerate(equity_curve):
             writer.writerow([idx, equity])
 
+    # Parity trace
+    with parity_path.open("w", encoding="utf-8") as f:
+        for entry in parity_trace:
+            f.write(json.dumps(entry) + "\n")
+
+    # Feature dumps
+    def _write_features(rows: List[Dict[str, Any]], path: Path) -> None:
+        if not rows:
+            path.write_text("", encoding="utf-8")
+            return
+        fieldnames: List[str] = sorted({k for row in rows for k in row.keys()})
+        with path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    _write_features(features_entry, features_entry_path)
+    _write_features(features_exit, features_exit_path)
+
+    # Config + summary
+    config_payload = _serialize_config(config)
+    config_payload["replay_stub_used"] = stub_used
+    if source_path:
+        config_payload["source_candles_path"] = source_path
+    config_payload["run_id"] = run_id
+    with config_path.open("w", encoding="utf-8") as f:
+        json.dump(config_payload, f, indent=2)
+
+    trades = result.get("trades") or []
+    stats = result.get("stats") or {}
+    side_breakdown: Dict[str, Dict[str, Any]] = {}
+    if trades:
+        side_keys: Set[str] = {str(t.get("side", "")).lower() for t in trades if t.get("side")}
+        for side in side_keys:
+            subset = [t for t in trades if str(t.get("side", "")).lower() == side]
+            total_pnl = sum(_safe_float(t.get("pnl"), 0.0) for t in subset)
+            wins = sum(1 for t in subset if _safe_float(t.get("pnl"), 0.0) > 0)
+            side_breakdown[side] = {
+                "trades": len(subset),
+                "avg_pnl": total_pnl / len(subset) if subset else 0.0,
+                "total_pnl": total_pnl,
+                "hit_rate": wins / len(subset) if subset else 0.0,
+            }
+
+    summary = {
+        "run_id": run_id,
+        "symbol": getattr(config, "symbol", "unknown"),
+        "timeframe": getattr(config, "timeframe", "unknown"),
+        "stub_used": stub_used,
+        "source_candles_path": source_path,
+        "stats": stats,
+        "side_breakdown": side_breakdown,
+    }
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info("Replay exports written to %s", run_path)
+
 
 # ---------------------------------------------------------------------------
 # GPT caller wrapper for replay (stub or real)
 # ---------------------------------------------------------------------------
 
 
-def _make_gpt_caller(use_stub: bool) -> Callable[[Config, Dict[str, Any], Dict[str, Any]], GptDecision]:
+def _make_gpt_caller(use_stub: bool, use_stub_v2: bool) -> Callable[[Config, Dict[str, Any], Dict[str, Any]], GptDecision]:
     """Create a GPT caller function for replay (either stub or real)."""
     if use_stub:
         def stub_caller(config: Config, snapshot: Dict[str, Any], state: Dict[str, Any]) -> GptDecision:
-            return generate_stub_decision(snapshot)
+            return generate_stub_decision_v2(snapshot) if use_stub_v2 else generate_stub_decision(snapshot)
         return stub_caller
     else:
         return call_gpt
@@ -241,7 +345,7 @@ def _make_gpt_caller(use_stub: bool) -> Callable[[Config, Dict[str, Any], Dict[s
 # ---------------------------------------------------------------------------
 
 
-def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool = False) -> Dict[str, Any]:
+def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool = False, run_tag: str | None = None) -> Dict[str, Any]:
     """
     Run a full backtest loop over a list of candle dicts for one symbol/timeframe.
 
@@ -266,6 +370,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     state["last_gpt_snapshot"] = None
     state["prev_snapshot"] = None
     state["snapshot_id"] = 0
+    state["run_id"] = run_tag or uuid.uuid4().hex
 
     # Decide whether to use the deterministic GPT stub for this replay run.
     stub_active = bool(use_gpt_stub or not os.getenv("OPENAI_API_KEY"))
@@ -275,7 +380,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     print(f"Replay GPT mode: {mode_msg}")
 
     # Create the appropriate GPT caller
-    gpt_caller = _make_gpt_caller(stub_active)
+    gpt_caller = _make_gpt_caller(stub_active, use_stub_v2=True)
 
     exec_adapter = ReplayExecutionAdapter()
 
@@ -285,6 +390,9 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     open_position: Optional[Dict[str, Any]] = None
     prev_snapshot: Optional[Dict[str, Any]] = None
     parity_trace: List[Dict[str, Any]] = []
+    features_at_entry: List[Dict[str, Any]] = []
+    features_at_exit: List[Dict[str, Any]] = []
+    pending_exit: Optional[Dict[str, Any]] = None
 
     for idx, candle in enumerate(candles):
         ts = _safe_float(candle.get("timestamp", idx), float(idx))
@@ -293,6 +401,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         if open_position:
             exit_price, exit_reason = _resolve_exit(open_position, candle)
             pnl = _compute_pnl(open_position, exit_price)
+            trade_id = open_position.get("trade_id", len(trades))
             trade = {
                 "side": open_position["side"],
                 "entry_price": _safe_float(open_position.get("entry_price")),
@@ -308,6 +417,13 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
             equity += pnl
             state["open_positions_summary"] = []
             open_position = None
+            pending_exit = {
+                "trade_id": trade_id,
+                "side": trade["side"],
+                "exit_price": trade["exit_price"],
+                "exit_reason": trade["exit_reason"],
+                "pnl": trade["pnl"],
+            }
 
         # Update equity stats before generating the next snapshot.
         state["equity"] = equity
@@ -338,6 +454,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
 
         # Handle position tracking based on spine result
         if spine_result.approved and spine_result.side != "flat":
+            trade_id = len(trades)
             position = {
                 "symbol": config.symbol,
                 "side": spine_result.side,
@@ -348,6 +465,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
                 "take_profit": spine_result.take_profit_price,
                 "leverage": spine_result.leverage,
                 "equity_at_entry": equity,
+                "trade_id": trade_id,
             }
             open_position = position
             state["open_positions_summary"] = [
@@ -359,9 +477,26 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
                     "timestamp": ts,
                 }
             ]
+            entry_features = _extract_features(snapshot)
+            entry_features.update(
+                {
+                    "trade_id": trade_id,
+                    "side": spine_result.side,
+                    "entry_price": snapshot.get("price", 0.0),
+                    "size": spine_result.position_size,
+                    "leverage": spine_result.leverage,
+                }
+            )
+            features_at_entry.append(entry_features)
         elif spine_result.gatekeeper_called:
             # Gatekeeper called but trade not approved - clear positions
             state["open_positions_summary"] = []
+
+        if pending_exit is not None:
+            exit_features = _extract_features(snapshot)
+            exit_features.update(pending_exit)
+            features_at_exit.append(exit_features)
+            pending_exit = None
 
         prev_snapshot = snapshot
         state["prev_snapshot"] = snapshot
@@ -371,6 +506,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
     if open_position and candles:
         final_exit_price, exit_reason = _resolve_exit(open_position, candles[-1])
         pnl = _compute_pnl(open_position, final_exit_price)
+        trade_id = open_position.get("trade_id", len(trades))
         trade = {
             "side": open_position["side"],
             "entry_price": _safe_float(open_position.get("entry_price")),
@@ -387,6 +523,17 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         state["equity"] = equity
         state["open_positions_summary"] = []
         equity_curve.append(equity)
+        exit_features = _extract_features(snapshot if 'snapshot' in locals() else {})
+        exit_features.update(
+            {
+                "trade_id": trade_id,
+                "side": trade["side"],
+                "exit_price": trade["exit_price"],
+                "exit_reason": trade["exit_reason"],
+                "pnl": trade["pnl"],
+            }
+        )
+        features_at_exit.append(exit_features)
         open_position = None
 
     winners = sum(1 for t in trades if t["pnl"] > 0)
@@ -400,9 +547,20 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
         "win_rate": winners / len(trades) if trades else 0.0,
         "final_equity": equity,
         "max_drawdown": max_drawdown,
+        "run_id": state.get("run_id"),
+        "stub_used": stub_active,
     }
 
-    return {"equity_curve": equity_curve, "trades": trades, "stats": stats, "parity_trace": parity_trace}
+    return {
+        "equity_curve": equity_curve,
+        "trades": trades,
+        "stats": stats,
+        "parity_trace": parity_trace,
+        "features_at_entry": features_at_entry,
+        "features_at_exit": features_at_exit,
+        "run_id": state.get("run_id"),
+        "stub_used": stub_active,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +569,7 @@ def run_replay(config: Config, candles: List[Dict[str, Any]], use_gpt_stub: bool
 
 
 def _print_summary(stats: Dict[str, Any]) -> None:
-    print("Replay complete.")
+    print(f"Replay complete. run_id={stats.get('run_id')}")
     print(f"Trades: {stats['trades']} | Win rate: {stats['win_rate'] * 100:.1f}%")
     print(f"Final equity: {stats['final_equity']:.2f}")
     print(f"Max drawdown: {stats['max_drawdown'] * 100:.2f}%")
@@ -441,6 +599,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional path to write replay parity trace as JSONL.",
     )
+    parser.add_argument(
+        "--run-tag",
+        type=str,
+        default=None,
+        help="Optional run_id to use for outputs (defaults to generated UUID).",
+    )
     return parser.parse_args()
 
 
@@ -462,17 +626,29 @@ if __name__ == "__main__":
     else:
         candles = generate_mock_candles(cfg.symbol, cfg.timeframe, limit=args.limit, start_price=args.start_price)
 
-    result = run_replay(cfg, candles, use_gpt_stub=args.stub)
+    result = run_replay(cfg, candles, use_gpt_stub=args.stub, run_tag=args.run_tag)
+    run_id = args.run_tag or result.get("run_id") or uuid.uuid4().hex
+    parity_trace = result.get("parity_trace", [])
     if args.parity_out:
         parity_path = Path(args.parity_out)
         parity_path.parent.mkdir(parents=True, exist_ok=True)
         with parity_path.open("w", encoding="utf-8") as f:
-            for entry in result.get("parity_trace", []):
+            for entry in parity_trace:
                 f.write(json.dumps(entry) + "\n")
         print(
-            f"Wrote parity trace with {len(result.get('parity_trace', []))} entries "
+            f"Wrote parity trace with {len(parity_trace)} entries "
             f"to {args.parity_out}"
         )
     _print_summary(result["stats"])
-    _write_replay_exports(result, cfg, args.out_dir)
-    print(f"Replay exports written to {args.out_dir}")
+    _write_replay_exports(
+        result,
+        cfg,
+        args.out_dir,
+        run_id=run_id,
+        parity_trace=parity_trace,
+        features_entry=result.get("features_at_entry", []),
+        features_exit=result.get("features_at_exit", []),
+        source_path=candle_path,
+        stub_used=bool(result.get("stub_used", False)),
+    )
+    print(f"Replay exports written to {Path(args.out_dir) / 'runs' / run_id}")

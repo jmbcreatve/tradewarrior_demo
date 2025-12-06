@@ -1,0 +1,25 @@
+{
+  "run_id": "ReplayStub_v2",
+  "symbol": "BTCUSDT",
+  "timeframe": "1m",
+  "stub_used": true,
+  "source_candles_path": "dumps/hl_mainnet_btcusdt_1m_60d.csv",
+  "stats": {
+    "trades": 30,
+    "winners": 15,
+    "losers": 15,
+    "win_rate": 0.5,
+    "final_equity": 9239.644590450322,
+    "max_drawdown": 0.0876999638876081,
+    "run_id": "ReplayStub_v2",
+    "stub_used": true
+  },
+  "side_breakdown": {
+    "short": {
+      "trades": 30,
+      "avg_pnl": -25.345180318322647,
+      "total_pnl": -760.3554095496794,
+      "hit_rate": 0.5
+    }
+  }
+}

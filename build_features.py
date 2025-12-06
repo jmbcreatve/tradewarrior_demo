@@ -127,6 +127,8 @@ def _compute_recent_price_path(candles: List[Dict[str, float]]) -> Dict[str, Any
         "ret_1": 0.0,
         "ret_5": 0.0,
         "ret_15": 0.0,
+        "ret_60": 0.0,
+        "ret_360": 0.0,
         "impulse_state": "unknown",
     }
     if not candles:
@@ -146,6 +148,8 @@ def _compute_recent_price_path(candles: List[Dict[str, float]]) -> Dict[str, Any
     result["ret_1"] = _ret(1)
     result["ret_5"] = _ret(5)
     result["ret_15"] = _ret(15)
+    result["ret_60"] = _ret(60)
+    result["ret_360"] = _ret(360)
 
     # Toy impulse classifier based on 5-bar return
     r5 = result["ret_5"]

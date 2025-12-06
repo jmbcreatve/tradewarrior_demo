@@ -94,4 +94,16 @@ Typical safe loop:
 5. `git add -A && git commit -m "short message" && git push origin main`
 
 Any agent asked to “edit code” should assume this workflow and not run git commands itself.
+
+---
+
+## 7. Replay Outputs & Indexing
+
+- Each replay writes to `analytics/runs/<run_id>/` with:
+  - `trades.csv`, `equity.csv`, `parity.jsonl`
+  - `features_at_entry.csv`, `features_at_exit.csv`
+  - `run_config.json` (full config + metadata) and `summary.json` (stats + side breakdown)
+- `TEST_INDEX.md` is a compact Markdown table linking run_id → tape/config/stats; one row per run.
+- Future analysis/scripts must read per-run folders (not a single global CSV).
+- When adding a new replay, record the run_id/path in `TEST_INDEX.md` and add a brief note only; details live in the run folder.
 `
