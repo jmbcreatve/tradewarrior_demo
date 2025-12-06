@@ -38,3 +38,4 @@ Each line should be one clear event; details belong in commits and TW_CANON.md.
 - 2025-12-05 – Added detailed logging to HyperliquidTestnetExecutionAdapter.health_check to surface SDK/credential initialization failures during testnet runs.
 - 2025-12-05 – Enhanced dump_hl_candles to loop Hyperliquid candles API for ~30 days of 1m data and write a single CSV for analytics.
 - 2025-12-05 – Added replay-only risk sizing controls (2–5% band), improved replay offline safeguards (testnet tape guard + source logging), created mainnet candle dumper, and introduced TEST_SUMMARIES.md for recording replay/test results.
+- 2025-12-05 – Added replay-only guard in risk_engine to block new longs when volatility is low, price is near the range highs, and short-horizon returns are tiny (chop-at-highs); logs a blocking note for parity/replay traces.

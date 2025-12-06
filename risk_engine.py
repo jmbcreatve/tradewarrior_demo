@@ -239,6 +239,38 @@ def evaluate_risk(
         except Exception:
             logger.info("RiskDecision event logging failed", exc_info=True)
 
+    # --- Replay-only guard for low-vol chop near highs (long entries) --------
+    is_replay = bool(state.get("replay_mode") or getattr(config, "replay_mode", False))
+    if is_replay and action == "long":
+        rpp = snapshot.get("recent_price_path") or {}
+        ret_5 = _get_float(rpp, "ret_5", 0.0)
+        ret_15 = _get_float(rpp, "ret_15", 0.0)
+
+        vol_low = vol_enum == VolatilityMode.LOW
+        range_top = range_enum in {RangePosition.HIGH, RangePosition.EXTREME_HIGH}
+        chop = abs(ret_5) < 0.003 and abs(ret_15) < 0.005
+
+        if vol_low and range_top and chop:
+            logger.info(
+                "Risk: replay gate blocked LONG in low-vol chop near highs "
+                "(ret5=%.4f, ret15=%.4f, range=%s, vol=%s)",
+                ret_5,
+                ret_15,
+                range_enum.value if hasattr(range_enum, "value") else range_enum,
+                vol_enum.value if hasattr(vol_enum, "value") else vol_enum,
+            )
+            decision = RiskDecision(
+                approved=False,
+                side=Side.FLAT.value,
+                position_size=0.0,
+                leverage=0.0,
+                stop_loss_price=None,
+                take_profit_price=None,
+                reason="replay_block_chop_high",
+            )
+            _log_risk_event(decision, effective_env)
+            return decision
+
     if action == "flat":
         logger.info("Risk: GPT requested FLAT; no trade.")
         decision = RiskDecision(
