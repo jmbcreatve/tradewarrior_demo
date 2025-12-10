@@ -262,10 +262,11 @@ TW-5 modules (`tw5/`):
     `tw5_equity_floor_pct`, `tw5_max_daily_loss_pct`
   - returns an approved flat plan when vetoing.
 
-- `tw5/gpt_client.py`  
+- `tw5/gpt_client.py`
   TW-5-specific GPT client:
-  - Uses its own inline system prompt (not `brain.txt`) and `Tw5Snapshot`/OrderPlan schema.
-  - Requires OPENAI_API_KEY; otherwise returns a flat “error” plan and records error.
+  - Loads its system prompt from `tw5/tw5_brain_<profile>.txt` based on `Config.tw5_prompt_profile` (default "conservative"), with an optional `TW5_PROMPT_PROFILE` env override.
+  - Uses `Tw5Snapshot`/OrderPlan schema (not the classic `brain.txt` or `GptDecision`).
+  - Requires OPENAI_API_KEY; otherwise returns a flat "error" plan and records error.
   - On success, parses JSON into an OrderPlan and records GPT success for safe-mode tracking.
   - On failure (API error / JSON error), returns a flat error plan and records GPT error.
 

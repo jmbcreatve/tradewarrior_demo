@@ -67,6 +67,11 @@ class Config:
     gpt_model: str = field(default_factory=lambda: os.getenv("TRADEWARRIOR_GPT_MODEL", "gpt-4o-mini"))
     gpt_max_tokens: int = 256
 
+    # TW-5 prompt profile selector: "conservative" or "aggressive"
+    # Controls which TW-5 brain file is loaded (tw5/tw5_brain_<profile>.txt)
+    # Default: "conservative" for safer, flatter trading
+    tw5_prompt_profile: str = "conservative"
+
     # Paths
     state_file: str = "state.json"  # Path to state JSON file
     log_dir: str = "logs"  # Directory for log files
