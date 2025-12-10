@@ -209,7 +209,7 @@ Classic spine:
 
 TW-5 modules (`tw5/`):
 
-- `tw5/schemas.py`  
+- `tw5/schemas.py`
   Defines TW-5 contracts:
   - `RunMode` enum: `ADVISOR`, `AGENT_CONFIRM`, `AUTO`.
   - `Tw5Snapshot`: tiny human-like snapshot panel (trend_1h/4h, 7d range position, swing/fibs, vol_mode + atr_pct,
@@ -217,8 +217,9 @@ TW-5 modules (`tw5/`):
   - `OrderPlan`: GPT/stub output (mode/side + legs + max_total_size_frac + confidence + rationale).
   - `OrderLeg` + `TPLevel`: fib-style legs with limit/market entries, stops, and TP ladder.
   - `RiskClampResult`: approved/vetoed, reason, original_plan, clamped_plan.
+  - `PendingOrder`: tracks unfilled limit orders in replay (plan, clamp_result, created_ts, created_idx, expires_idx, snapshot).
 
-- `tw5/snapshot_builder.py`  
+- `tw5/snapshot_builder.py`
   Builds `Tw5Snapshot` from:
   - config (symbol/timeframe)
   - market_data["candles"]
@@ -226,7 +227,7 @@ TW-5 modules (`tw5/`):
   Implements:
   - trend_1h/4h via simple close-to-close change over fixed bar windows
   - 7d-style range and range_position_7d (extreme_low/low/mid/high/extreme_high)
-  - swing_low/high as full-window range
+  - swing_low/high from HISTORICAL bars only (current bar excluded to prevent hindsight bias)
   - fib levels from swing
   - ATR-like volatility from avg |ret| and vol_mode (low/normal/high/explosive)
   - last_impulse_direction/size_pct over a short lookback
@@ -285,8 +286,17 @@ TW-5 modules (`tw5/`):
 - `tw5/executor.py`  
   Skeleton for a future TW-5 execution adapter wrapper (currently no-op).
 
-- `tw5/replay.py`  
-  Skeleton for a future TW-5 replay harness (candles → run_tw5_tick over history).
+- `tw5/replay.py`
+  TW-5 replay harness with realistic limit order simulation:
+  - Loads candles from CSV or in-memory sequences
+  - Runs structural replay (no PnL): candles → Tw5Snapshot → gatekeeper → GPT/stub → risk_clamp → TickResult[]
+  - Runs PnL replay with persistent limit orders:
+    - Tracks pending orders across bars (PendingOrder dataclass)
+    - Orders expire after configurable lifetime (default: 100 bars)
+    - Fills when entry price touched within bar's OHLC range
+    - Gap-aware stop/TP execution with slippage (3 bps) and fees (4 bps per side)
+    - One position at a time, max hold bars enforcement
+  - Returns replay statistics: equity curve, trade list, win rate, avg R, max drawdown.
 
 5. Core Contracts
 
@@ -505,7 +515,31 @@ original_plan: OrderPlan
 
 clamped_plan: OrderPlan | None (flat plan when vetoed)
 
-The clamp must never “expand” risk vs original; it can only veto or shrink.
+The clamp must never "expand" risk vs original; it can only veto or shrink.
+
+5.8 TW-5 PendingOrder schema (v0)
+
+PendingOrder (for replay only):
+
+plan: OrderPlan (the original plan that generated this order)
+
+clamp_result: RiskClampResult (the risk clamp result for this plan)
+
+created_ts: float (timestamp when order was created)
+
+created_idx: int (bar index when order was created)
+
+expires_idx: int | None (bar index when order expires, None = no expiry)
+
+snapshot: Tw5Snapshot | None (snapshot at creation time for context)
+
+Helpers:
+
+is_expired(current_idx: int) -> bool: checks if order has expired
+
+PendingOrder objects allow limit orders to persist across bars until filled or expired,
+enabling realistic backtesting where pullback entries can fill on future bars when price
+reaches the limit level.
 
 Phases & Tasks
 
@@ -592,9 +626,11 @@ Status: 🚧 In progress
 
 Completed:
 
-Defined Tw5Snapshot + OrderPlan + RiskClampResult schemas.
+Defined Tw5Snapshot + OrderPlan + RiskClampResult + PendingOrder schemas.
 
 Implemented build_tw5_snapshot() with trend/range/fib/vol/impulse logic.
+
+Fixed hindsight bias: swing_low/swing_high now computed from historical bars only.
 
 Implemented deterministic TW-5 stub policy (fib-based trend follower).
 
@@ -606,11 +642,11 @@ Implemented TW-5 risk clamp with equity floor + daily loss + max_stop_pct + down
 
 Implemented run_tw5_tick() engine wrapper for advisor-style ticks with optional state persistence.
 
+Implemented TW-5 replay harness with persistent limit order simulation, gap-aware exits, slippage, and fees.
+
 Planned:
 
 TW-5 executor wrapper to translate clamped plans into classic RiskDecision/exec calls.
-
-TW-5 replay harness (candles → run_tw5_tick loop + TW-5-specific exports).
 
 Tests for TW-5 snapshot builder, gatekeeper, GPT client parsing, risk clamp, and engine wiring.
 
