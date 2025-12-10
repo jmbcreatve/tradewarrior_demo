@@ -243,3 +243,38 @@ class RiskClampResult:
             "original_plan": self.original_plan.to_dict(),
             "clamped_plan": self.clamped_plan.to_dict() if self.clamped_plan is not None else None,
         }
+
+
+# ---------------------------------------------------------------------------
+# Pending limit order for replay simulation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PendingOrder:
+    """Tracks a pending limit order in replay simulation.
+
+    This allows limit orders to persist across bars until filled or cancelled,
+    providing realistic backtesting where pullback entries can fill on future bars.
+
+    Fields:
+        plan:          The order plan (enter/manage) that generated this order.
+        clamp_result:  The risk clamp result for this plan.
+        created_ts:    Timestamp when the order was created.
+        created_idx:   Bar index when the order was created.
+        expires_idx:   Bar index when this order expires (None = no expiry).
+        snapshot:      The snapshot at the time the order was created.
+    """
+
+    plan: OrderPlan
+    clamp_result: RiskClampResult
+    created_ts: float
+    created_idx: int
+    expires_idx: Optional[int] = None
+    snapshot: Optional[Tw5Snapshot] = None
+
+    def is_expired(self, current_idx: int) -> bool:
+        """Check if this order has expired based on bar index."""
+        if self.expires_idx is None:
+            return False
+        return current_idx >= self.expires_idx

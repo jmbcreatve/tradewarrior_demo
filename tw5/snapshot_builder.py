@@ -67,12 +67,14 @@ def build_tw5_snapshot(
     trend_1h = _compute_trend_for_window(candles, bars_1h)
     trend_4h = _compute_trend_for_window(candles, bars_4h)
 
-    # Range low/high over full window + position
+    # Range low/high over full window + position (includes current bar for range position)
     range_low_7d, range_high_7d, range_position_7d = _compute_range_and_position(candles, price)
 
-    # Swing = full-window range for v1
-    swing_low = range_low_7d
-    swing_high = range_high_7d
+    # CRITICAL FIX: Swing levels must use ONLY HISTORICAL bars, not current bar
+    # This prevents hindsight bias where stops are placed using future price data
+    historical_candles = candles[:-1] if len(candles) > 1 else candles
+    swing_low, swing_high = _compute_swing_levels(historical_candles)
+
     fib_0_382, fib_0_5, fib_0_618, fib_0_786 = _compute_fibs(swing_low, swing_high)
 
     # Volatility via average absolute close-to-close returns
@@ -258,6 +260,28 @@ def _compute_range_and_position(
         rp = "mid"
 
     return low, high, rp
+
+
+def _compute_swing_levels(candles: List[Dict[str, Any]]) -> tuple[float, float]:
+    """
+    Compute swing low/high from HISTORICAL candles only (excludes current bar).
+
+    This prevents hindsight bias by using only past price data to establish
+    support/resistance levels for stop placement.
+
+    Returns (swing_low, swing_high)
+    """
+    if not candles:
+        return 0.0, 0.0
+
+    closes = _get_closes(candles)
+    if not closes:
+        return 0.0, 0.0
+
+    swing_low = min(closes)
+    swing_high = max(closes)
+
+    return swing_low, swing_high
 
 
 # ---------------------------------------------------------------------------
