@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config import Config
@@ -27,7 +28,7 @@ from .stub import generate_tw5_stub_plan
 
 logger = get_logger(__name__)
 
-_TW5_SYSTEM_PROMPT_CACHE: Optional[str] = None
+_TW5_SYSTEM_PROMPT_CACHE: Dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -79,13 +80,22 @@ def generate_order_plan_with_gpt(
     # Choose model: allow override via env, fallback to config.gpt_model
     model_name = os.getenv("TRADEWARRIOR_GPT_MODEL", config.gpt_model)
 
+    # Determine active profile from config, with env var override
+    profile = getattr(config, "tw5_prompt_profile", None)
+    if not profile:
+        profile = os.getenv("TW5_PROMPT_PROFILE", "conservative")
+    # Normalize and coerce unknown values to "conservative"
+    profile = profile.lower().strip()
+    if profile not in ("conservative", "aggressive"):
+        profile = "conservative"
+
     try:
         import openai  # type: ignore[attr-defined]
 
         # Legacy v0.x style (openai==0.28.x)
         openai.api_key = api_key
 
-        system_prompt = _load_tw5_system_prompt()
+        system_prompt = _load_tw5_system_prompt(profile)
         user_message = _build_user_message(snapshot)
 
         response = openai.ChatCompletion.create(  # type: ignore[attr-defined]
@@ -126,73 +136,50 @@ def generate_order_plan_with_gpt(
 # ---------------------------------------------------------------------------
 
 
-def _load_tw5_system_prompt() -> str:
+def _load_tw5_system_prompt(profile: str) -> str:
     """
-    Load (or lazily cache) the TW-5 system prompt.
+    Load (or lazily cache) the TW-5 system prompt from external brain files.
 
-    For now this is defined inline. If you want to edit it more freely,
-    we can later move it into a separate prompt file.
+    Args:
+        profile: Prompt profile name ("conservative" or "aggressive").
+                 Unknown values are coerced to "conservative".
+
+    Returns:
+        The system prompt text for the specified profile.
+
+    The prompt is loaded from tw5/tw5_brain_<profile>.txt relative to this module.
     """
     global _TW5_SYSTEM_PROMPT_CACHE
-    if _TW5_SYSTEM_PROMPT_CACHE is not None:
-        return _TW5_SYSTEM_PROMPT_CACHE
 
-    prompt = """
-You are TW-5, a crypto trade planning agent.
+    # Normalize profile
+    profile = profile.lower().strip()
+    if profile not in ("conservative", "aggressive"):
+        profile = "conservative"
 
-You receive a minimal, human-readable MARKET SNAPSHOT for a single symbol and timeframe.
-Your job is to propose a clear, fib-style ORDER PLAN for that symbol.
+    # Check cache
+    if profile in _TW5_SYSTEM_PROMPT_CACHE:
+        return _TW5_SYSTEM_PROMPT_CACHE[profile]
 
-Constraints:
-- You are NOT responsible for final risk caps; a separate risk clamp will shrink or veto your plan.
-- You MUST still behave sensibly: do not propose absurdly wide stops or random directions.
-- You plan for ONE instrument only (the symbol in the snapshot).
+    # Build path to brain file
+    prompt_filename = f"tw5_brain_{profile}.txt"
+    prompt_path = Path(__file__).resolve().parent / prompt_filename
 
-Market model:
-- Use trend_1h and trend_4h as your directional anchor.
-- Use swing_low / swing_high and fib_0_382 / fib_0_5 / fib_0_618 / fib_0_786 for pullback entries.
-- Use range_low_7d / range_high_7d / range_position_7d to know if price is at discount, mid, or premium.
-- Use vol_mode and atr_pct to judge how aggressive you should be.
-- Use last_impulse_direction/size_pct to avoid chasing exhaustion moves.
-
-Rules:
-- Prefer to ladder entries at meaningful fib levels in the direction of the 4h trend.
-- Stops should be beyond the swing extremes, but not absurdly far; the risk clamp may tighten them further.
-- Take profits should be defined in terms of reward relative to risk (1R, 2R, etc.), not random numbers.
-- If the snapshot looks untradeable (e.g. price <= 0, vol_mode unknown, trend unclear), return a FLAT plan.
-
-Output:
-You MUST respond with ONLY a single JSON object, no prose, no markdown.
-
-The object MUST have exactly these top-level keys:
-- "mode": "enter" | "manage" | "flat"
-- "side": "long" | "short" | "flat"
-- "max_total_size_frac": number between 0 and 1
-- "confidence": number between 0 and 1
-- "rationale": short human-readable string
-- "legs": array of leg objects
-
-Each leg object MUST have:
-- "id": string identifier (e.g. "leg1")
-- "entry_type": "limit" or "market"
-- "entry_price": absolute price (number)
-- "entry_tag": string label for where this sits (e.g. "fib_0.382", "price", "range_low")
-- "size_frac": fraction of the overall position allocated to this leg (0–1)
-- "stop_loss": absolute stop price (number)
-- "take_profits": array of TP objects
-
-Each TP object MUST have:
-- "price": absolute price (number)
-- "size_frac": fraction of the leg closed at this TP (0–1)
-- "tag": short label (e.g. "1R", "2R", "partial")
-
-Important:
-- The sum of leg.size_frac values does NOT need to be 1.0; it will be normalised and clamped downstream.
-- Never include comments, explanations, or any text outside the JSON.
-    """.strip()
-
-    _TW5_SYSTEM_PROMPT_CACHE = prompt
-    return prompt
+    try:
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            prompt = f.read()
+        _TW5_SYSTEM_PROMPT_CACHE[profile] = prompt
+        logger.debug("Loaded TW-5 system prompt for profile '%s' from %s", profile, prompt_path)
+        return prompt
+    except FileNotFoundError:
+        logger.error(
+            "TW-5 brain file not found: %s. Falling back to conservative.",
+            prompt_path,
+        )
+        # Fallback: try conservative if aggressive was requested but not found
+        if profile != "conservative":
+            return _load_tw5_system_prompt("conservative")
+        # If even conservative is missing, raise
+        raise
 
 
 def _build_user_message(snapshot: Tw5Snapshot) -> str:
