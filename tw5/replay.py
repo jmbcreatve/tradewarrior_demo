@@ -494,6 +494,14 @@ def run_tw5_replay_with_pnl_from_candles(
 
                 # Validate and size the position
                 if entry_price > 0.0 and stop_loss > 0.0 and entry_price != stop_loss:
+                    entry_snapshot = filled_order.snapshot or tick.snapshot
+                    entry_gpt_called = getattr(filled_order, "gpt_called", tick.gpt_called)
+                    entry_gpt_reason = getattr(filled_order, "gpt_reason", tick.gpt_reason)
+                    entry_clamp_reason = getattr(
+                        filled_order,
+                        "clamp_reason",
+                        getattr(filled_order.clamp_result, "reason", None),
+                    )
                     risk_per_unit = abs(entry_price - stop_loss)
                     risk_value = equity * risk_pct
                     if risk_value > 0.0 and risk_per_unit > 0.0:
@@ -509,6 +517,10 @@ def run_tw5_replay_with_pnl_from_candles(
                                 "entry_ts": ts,
                                 "entry_equity": equity,
                                 "risk_value": risk_value,
+                                "entry_snapshot": entry_snapshot,
+                                "entry_gpt_called": entry_gpt_called,
+                                "entry_gpt_reason": entry_gpt_reason,
+                                "entry_clamp_reason": entry_clamp_reason,
                             }
                             bars_in_trade = 0
 
@@ -555,6 +567,7 @@ def run_tw5_replay_with_pnl_from_candles(
                 equity += pnl
                 equity_curve.append(equity)
 
+                snap = open_pos.get("entry_snapshot")
                 trades.append(
                     {
                         "side": side,
@@ -567,6 +580,15 @@ def run_tw5_replay_with_pnl_from_candles(
                         "return_pct": ret_pct,
                         "R": r_mult,
                         "exit_reason": exit_reason,
+                        "trend_1h": getattr(snap, "trend_1h", None),
+                        "trend_4h": getattr(snap, "trend_4h", None),
+                        "range_position_7d": getattr(snap, "range_position_7d", None),
+                        "vol_mode": getattr(snap, "vol_mode", None),
+                        "last_impulse_direction": getattr(snap, "last_impulse_direction", None),
+                        "last_impulse_size_pct": getattr(snap, "last_impulse_size_pct", None),
+                        "gpt_called": open_pos.get("entry_gpt_called"),
+                        "gpt_reason": open_pos.get("entry_gpt_reason"),
+                        "clamp_reason": open_pos.get("entry_clamp_reason"),
                     }
                 )
 
@@ -643,6 +665,10 @@ def run_tw5_replay_with_pnl_from_candles(
             take_profit = tp_num / tp_den if tp_den > 0.0 else None
 
             if entry_price > 0.0 and stop_loss > 0.0 and entry_price != stop_loss:
+                entry_snapshot = tick.snapshot
+                entry_gpt_called = tick.gpt_called
+                entry_gpt_reason = tick.gpt_reason
+                entry_clamp_reason = getattr(tick.clamp_result, "reason", None)
                 risk_per_unit = abs(entry_price - stop_loss)
                 risk_value = equity * risk_pct
                 if risk_value > 0.0 and risk_per_unit > 0.0:
@@ -657,6 +683,10 @@ def run_tw5_replay_with_pnl_from_candles(
                             "entry_ts": ts,
                             "entry_equity": equity,
                             "risk_value": risk_value,
+                            "entry_snapshot": entry_snapshot,
+                            "entry_gpt_called": entry_gpt_called,
+                            "entry_gpt_reason": entry_gpt_reason,
+                            "entry_clamp_reason": entry_clamp_reason,
                         }
                         bars_in_trade = 0
 
@@ -673,6 +703,9 @@ def run_tw5_replay_with_pnl_from_candles(
                 expires_idx=idx + order_lifetime_bars,
                 snapshot=snapshot,
             )
+            pending_order.gpt_called = tick.gpt_called
+            pending_order.gpt_reason = tick.gpt_reason
+            pending_order.clamp_reason = getattr(clamp, "reason", None)
             pending_orders.append(pending_order)
 
     # If still in a trade at the end, close at last candle
@@ -711,6 +744,7 @@ def run_tw5_replay_with_pnl_from_candles(
         equity += pnl
         equity_curve.append(equity)
 
+        snap = open_pos.get("entry_snapshot")
         trades.append(
             {
                 "side": side,
@@ -723,6 +757,15 @@ def run_tw5_replay_with_pnl_from_candles(
                 "return_pct": ret_pct,
                 "R": r_mult,
                 "exit_reason": exit_reason,
+                "trend_1h": getattr(snap, "trend_1h", None),
+                "trend_4h": getattr(snap, "trend_4h", None),
+                "range_position_7d": getattr(snap, "range_position_7d", None),
+                "vol_mode": getattr(snap, "vol_mode", None),
+                "last_impulse_direction": getattr(snap, "last_impulse_direction", None),
+                "last_impulse_size_pct": getattr(snap, "last_impulse_size_pct", None),
+                "gpt_called": open_pos.get("entry_gpt_called"),
+                "gpt_reason": open_pos.get("entry_gpt_reason"),
+                "clamp_reason": open_pos.get("entry_clamp_reason"),
             }
         )
 

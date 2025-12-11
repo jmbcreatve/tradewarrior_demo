@@ -32,6 +32,10 @@ twp3_testnet.env
 .tradewarrior_kill_switch
 
 # Big data / backtest outputs
+dumps/*.bak
 dumps/*.csv
 data/binance/**/*.csv
 data/binance/**/*.zip
+analytics/runs/
+analytics/**/*.jsonl
+analytics/**/*.csv
