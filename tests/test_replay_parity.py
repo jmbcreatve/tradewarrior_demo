@@ -9,7 +9,7 @@ from config import Config, load_config
 from replay_engine import run_replay
 from engine import run_spine_tick, SpineTickResult
 from build_features import build_snapshot
-from replay_gpt_stub import generate_stub_decision
+from replay_gpt_stub import generate_stub_decision, generate_stub_decision_v2
 from state_memory import reset_state
 from adapters.mock_execution_adapter import MockExecutionAdapter
 
@@ -131,7 +131,7 @@ def test_spine_tick_and_replay_produce_same_decisions(tmp_path):
             state=state,
             config=cfg,
             exec_adapter=exec_adapter,
-            gpt_caller=lambda cfg, snap, st: generate_stub_decision(snap),
+            gpt_caller=lambda cfg, snap, st: generate_stub_decision_v2(snap),
         )
         manual_trace.append(spine_result.to_parity_trace_entry())
         prev_snapshot = snapshot

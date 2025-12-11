@@ -25,7 +25,10 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 from copy import deepcopy
 import argparse
 import csv
+import json
 import time
+import uuid
+from pathlib import Path
 
 from config import Config, load_testnet_config
 from logger_utils import get_logger
@@ -747,6 +750,166 @@ def run_tw5_replay_with_pnl_from_candles(
         avg_r=avg_r,
     )
     return ticks, stats
+
+
+# ---------------------------------------------------------------------------
+# 3) Exports
+# ---------------------------------------------------------------------------
+
+
+def _serialize_config_tw5(config: Config) -> Dict[str, Any]:
+    """JSON-safe Config serialiser."""
+    payload: Dict[str, Any] = {}
+    for key, value in vars(config).items():
+        if hasattr(value, "value"):
+            payload[key] = value.value
+        elif isinstance(value, (list, tuple, set)):
+            payload[key] = list(value)
+        else:
+            payload[key] = value
+    return payload
+
+
+def _tick_to_parity_entry(tick: TickResult) -> Dict[str, Any]:
+    """Flatten a TickResult into a parity trace entry."""
+    snapshot = tick.snapshot
+    clamp = tick.clamp_result
+    plan = clamp.clamped_plan if clamp and clamp.clamped_plan is not None else tick.plan
+
+    entry = {
+        "timestamp": getattr(snapshot, "timestamp", None),
+        "price": getattr(snapshot, "price", None),
+        "symbol": getattr(snapshot, "symbol", None),
+        "timeframe": getattr(snapshot, "timeframe", None),
+        "gpt_called": tick.gpt_called,
+        "gpt_reason": tick.gpt_reason,
+        "approved": bool(clamp.approved) if clamp is not None else False,
+        "side": getattr(plan, "side", "flat") if plan is not None else "flat",
+        "mode": getattr(plan, "mode", "flat") if plan is not None else "flat",
+        "max_total_size_frac": getattr(plan, "max_total_size_frac", None) if plan is not None else None,
+        "confidence": getattr(plan, "confidence", None) if plan is not None else None,
+    }
+    if clamp is not None:
+        entry["clamp_reason"] = clamp.reason
+    return entry
+
+
+def export_tw5_replay_to_run_folder(
+    ticks: Sequence[TickResult],
+    config: Config,
+    stats: Tw5ReplayStats | None = None,
+    run_id: str | None = None,
+    base_dir: str = "analytics/runs",
+    source_path: str | None = None,
+    parity_trace: Sequence[Dict[str, Any]] | None = None,
+    stub_used: bool = True,
+) -> str:
+    """
+    Write TW-5 replay exports to analytics/runs/<run_id>/ and return the run path.
+
+    Files:
+      - trades.csv
+      - equity.csv
+      - parity.jsonl
+      - config.json
+      - summary.json
+    """
+    run_id = run_id or uuid.uuid4().hex
+    run_path = Path(base_dir) / run_id
+    run_path.mkdir(parents=True, exist_ok=True)
+
+    parity_entries = list(parity_trace) if parity_trace is not None else [_tick_to_parity_entry(t) for t in ticks]
+    parity_path = run_path / "parity.jsonl"
+    with parity_path.open("w", encoding="utf-8") as f:
+        for entry in parity_entries:
+            f.write(json.dumps(entry) + "\n")
+
+    trades: List[Dict[str, Any]] = list(stats.trades) if stats and stats.trades is not None else []
+    equity_curve = list(stats.equity_curve) if stats and stats.equity_curve else []
+    if not equity_curve:
+        start_equity = float(getattr(config, "initial_equity", 0.0) or 0.0)
+        equity_curve = [start_equity] * (len(ticks) + 1 if ticks else 1)
+
+    trades_path = run_path / "trades.csv"
+    trade_fields = [
+        "side",
+        "entry_price",
+        "exit_price",
+        "size",
+        "entry_ts",
+        "exit_ts",
+        "pnl",
+        "return_pct",
+        "R",
+        "exit_reason",
+    ]
+    trade_defaults = {field: 0 for field in trade_fields}
+    trade_defaults.update({"side": "", "exit_reason": ""})
+
+    with trades_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=trade_fields)
+        writer.writeheader()
+        for trade in trades:
+            row = {field: trade_defaults[field] for field in trade_fields}
+            if isinstance(trade, dict):
+                for field in trade_fields:
+                    value = trade.get(field, trade_defaults[field])
+                    row[field] = value if value not in {None, ""} else trade_defaults[field]
+            writer.writerow(row)
+
+    equity_path = run_path / "equity.csv"
+    with equity_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["step", "equity"])
+        for idx, equity in enumerate(equity_curve):
+            writer.writerow([idx, equity])
+
+    config_payload = _serialize_config_tw5(config)
+    config_payload["run_id"] = run_id
+    config_payload["stub_used"] = stub_used
+    if source_path:
+        config_payload["source_candles_path"] = source_path
+
+    config_path = run_path / "config.json"
+    with config_path.open("w", encoding="utf-8") as f:
+        json.dump(config_payload, f, indent=2)
+
+    summary_stats: Dict[str, Any]
+    if stats is not None:
+        summary_stats = {
+            "total_pnl": stats.total_pnl,
+            "total_return_pct": stats.total_return_pct,
+            "max_drawdown": stats.max_drawdown,
+            "trade_count": stats.trade_count,
+            "win_rate": stats.win_rate,
+            "avg_r": stats.avg_r,
+        }
+    else:
+        total_pnl = sum(_safe_float(t.get("pnl"), 0.0) for t in trades)
+        trade_count = len(trades)
+        summary_stats = {
+            "total_pnl": total_pnl,
+            "total_return_pct": 0.0,
+            "max_drawdown": _max_drawdown(equity_curve) if equity_curve else 0.0,
+            "trade_count": trade_count,
+            "win_rate": 0.0,
+            "avg_r": 0.0,
+        }
+
+    summary = {
+        "run_id": run_id,
+        "symbol": getattr(config, "symbol", "unknown"),
+        "timeframe": getattr(config, "timeframe", "unknown"),
+        "stub_used": stub_used,
+        "source_candles_path": source_path,
+        "stats": summary_stats,
+    }
+    summary_path = run_path / "summary.json"
+    with summary_path.open("w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    logger.info("TW-5 replay exports written to %s", run_path)
+    return str(run_path)
 
 
 # ---------------------------------------------------------------------------
