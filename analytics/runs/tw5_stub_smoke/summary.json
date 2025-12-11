@@ -1,0 +1,15 @@
+{
+  "run_id": "tw5_stub_smoke",
+  "symbol": "BTCUSDT",
+  "timeframe": "1m",
+  "stub_used": true,
+  "source_candles_path": "/root/tradewarrior_demo/dumps/btcusdt_1m_30d.csv",
+  "stats": {
+    "total_pnl": 0,
+    "total_return_pct": 0.0,
+    "max_drawdown": 0.0,
+    "trade_count": 0,
+    "win_rate": 0.0,
+    "avg_r": 0.0
+  }
+}

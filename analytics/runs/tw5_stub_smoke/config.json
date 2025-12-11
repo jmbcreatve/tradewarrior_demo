@@ -1,0 +1,30 @@
+{
+  "symbol": "BTCUSDT",
+  "timeframe": "1m",
+  "risk_per_trade": 0.005,
+  "max_leverage": 3.0,
+  "max_leverage_10x_mode": 10.0,
+  "replay_risk_floor_pct": 0.02,
+  "replay_risk_cap_pct": 0.05,
+  "replay_notional_cap_pct": 10.0,
+  "replay_mode": true,
+  "initial_equity": 10000.0,
+  "loop_sleep_seconds": 3.0,
+  "primary_data_source_id": "hl",
+  "backup_data_source_ids": [
+    "mock"
+  ],
+  "primary_execution_id": "mock",
+  "backup_execution_ids": [],
+  "execution_mode": "sim",
+  "paper_trading": true,
+  "is_testnet": false,
+  "gpt_model": "gpt-4o-mini",
+  "gpt_max_tokens": 256,
+  "tw5_prompt_profile": "conservative",
+  "state_file": "state.json",
+  "log_dir": "logs",
+  "run_id": "tw5_stub_smoke",
+  "stub_used": true,
+  "source_candles_path": "/root/tradewarrior_demo/dumps/btcusdt_1m_30d.csv"
+}
