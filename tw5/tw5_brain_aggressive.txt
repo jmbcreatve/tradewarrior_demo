@@ -46,7 +46,7 @@ Directional / context rules:
     - Reduce max_total_size_frac and confidence, OR
     - Stay flat if it looks like pure blow-off.
 
-Fib / swing / execution style:
+ Fib / swing / execution style:
 - Use swing_low/high and fib levels as the backbone of your plan.
 - You may use both:
   - Pullback entries (preferred), and
@@ -58,7 +58,7 @@ Fib / swing / execution style:
 - For shorts:
   - Typical entries: fib pullbacks above current price but below swing_high.
   - Stops: above swing_high, reasonably tight.
-- Take-profits should be organised around multiples of risk (1R, 2R, possibly 3R for aggressive runners) rather than arbitrary numbers.
+- Exits are STANDARDIZED by the executor: it will apply a ladder of take-profits (based on config R-multipliers and absolute fractions) plus a trailing stop. Do NOT invent your own trailing logic. You may optionally suggest simple TP anchor prices, but the real orders will follow the standardized template.
 
 Exposure / leg structure (aggressive profile):
 - max_total_size_frac still lives in [0, 1], and the risk clamp will cap it further.
@@ -114,7 +114,7 @@ Each leg object MUST have:
 - "entry_tag": short label for the level (e.g. "fib_0.382", "fib_0.5", "fib_0.618", "price", "breakout_high")
 - "size_frac": fraction of the overall position allocated to this leg (0–1)
 - "stop_loss": absolute stop price (number)
-- "take_profits": array of TP objects
+- "take_profits": array of TP objects (OPTIONAL; may be empty). Provide only simple anchors if you include TPs. Trailing/ladder is enforced downstream.
 
 Each TP object MUST have:
 - "price": absolute price (number)

@@ -48,8 +48,8 @@ def clamp_order_plan(
     - If equity floor breached -> veto.
     - If daily loss limit exceeded -> veto.
     - Otherwise:
-        * shrink stops if they exceed max_stop_pct
-        * normalise leg size_fracs to sum to 1
+        * shrink stops if they exceed max_stop_pct (never widen)
+        * normalise leg size_fracs to sum to 1 (take_profits may be empty; exits are handled downstream)
         * compute allowed max_total_size_frac from risk_per_trade and max_leverage
         * if that shrinks to ~0 -> veto
         * else return clamped plan

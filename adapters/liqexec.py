@@ -38,6 +38,29 @@ def _normalize_symbol(symbol: str) -> str:
     return SYMBOL_MAP.get(symbol.upper(), symbol.upper().replace("USDT", "").replace("-USD", ""))
 
 
+def _extract_oid_from_response(resp: Dict[str, Any]) -> Optional[Any]:
+    """
+    Extract an order ID (oid) from common Hyperliquid responses.
+
+    Supports responses shaped like:
+      {"response": {"data": {"statuses": [{"filled": {"oid": ...}}]}}}
+      {"response": {"data": {"statuses": [{"resting": {"oid": ...}}]}}}
+    """
+    try:
+        statuses = resp.get("response", {}).get("data", {}).get("statuses", [])
+        if not statuses:
+            return None
+        status = statuses[0]
+        if "filled" in status:
+            return status["filled"].get("oid")
+        if "resting" in status:
+            return status["resting"].get("oid")
+        # Fallback: sometimes oid is top-level in status
+        return status.get("oid")
+    except Exception:
+        return None
+
+
 class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
     """
     Hyperliquid testnet execution adapter for placing real testnet orders.
@@ -470,6 +493,189 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
                 symbol, e,
                 exc_info=True
             )
+
+    # ------------------------------------------------------------------ #
+    # Extended helpers (TW-5 + execution utilities)                      #
+    # ------------------------------------------------------------------ #
+
+    def get_account_value_usd(self) -> float:
+        """
+        Return account value in USD from user_state(). Falls back to 0.0 on error.
+        """
+        if self._info is None or self._account is None:
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, account value unavailable")
+            return 0.0
+        try:
+            user_state = self._info.user_state(self._account.address) or {}
+            margin = user_state.get("marginSummary", {}) or {}
+            acct_val = margin.get("accountValue", margin.get("accountValueCombined"))
+            return float(acct_val) if acct_val is not None else 0.0
+        except Exception as e:
+            logger.error("HyperliquidTestnetExecutionAdapter: Failed to fetch account value: %s", e, exc_info=True)
+            return 0.0
+
+    def get_open_orders(self, symbol: str) -> List[Dict[str, Any]]:
+        """
+        Return open orders for a symbol (frontend_open_orders filtered by coin).
+        """
+        if self._info is None or self._account is None:
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot fetch open orders")
+            return []
+
+        try:
+            hl_symbol = _normalize_symbol(symbol)
+            account_address = self._account.address
+            orders = self._info.frontend_open_orders(account_address) or []
+            return [o for o in orders if str(o.get("coin")) == hl_symbol]
+        except Exception as e:
+            logger.error("HyperliquidTestnetExecutionAdapter: Failed to fetch open orders for %s: %s", symbol, e)
+            return []
+
+    def cancel_orders(self, symbol: str, oids: List[int]) -> Dict[str, Any]:
+        """
+        Bulk-cancel specific order IDs for a symbol.
+        """
+        if self._exchange is None or self._info is None:
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot cancel orders")
+            return {"status": "error", "reason": "sdk_not_initialized"}
+
+        hl_symbol = _normalize_symbol(symbol)
+        cancels = [{"coin": hl_symbol, "oid": oid} for oid in oids or []]
+        if not cancels:
+            return {"status": "ok", "cancelled": 0}
+
+        try:
+            return self._exchange.bulk_cancel(cancels)
+        except Exception as e:
+            logger.error("HyperliquidTestnetExecutionAdapter: bulk_cancel failed: %s", e, exc_info=True)
+            return {"status": "error", "reason": str(e)}
+
+    def place_limit_order(
+        self,
+        symbol: str,
+        is_buy: bool,
+        sz: float,
+        limit_px: float,
+        reduce_only: bool = False,
+        tif: str = "Gtc",
+    ) -> Dict[str, Any]:
+        """
+        Place a limit order. Developer note: HL limit payload is order_type={"limit": {"tif": "<tif>"}}.
+        """
+        if self._exchange is None or self._info is None:
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot place limit order")
+            return {"status": "error", "reason": "sdk_not_initialized"}
+
+        order = {
+            "coin": _normalize_symbol(symbol),
+            "is_buy": bool(is_buy),
+            "sz": float(sz),
+            "limit_px": float(limit_px),
+            "reduce_only": bool(reduce_only),
+            "order_type": {"limit": {"tif": tif}},
+        }
+
+        try:
+            resp = self._exchange.place_order(order)
+        except Exception as e:
+            logger.error("HyperliquidTestnetExecutionAdapter: place_limit_order failed: %s", e, exc_info=True)
+            return {"status": "error", "reason": str(e)}
+
+        oid = _extract_oid_from_response(resp)
+        if oid is not None:
+            resp = dict(resp)
+            resp["oid"] = oid
+        return resp
+
+    def place_trigger_order(
+        self,
+        symbol: str,
+        is_buy: bool,
+        sz: float,
+        trigger_px: float,
+        reduce_only: bool = True,
+        tpsl: str = "sl",
+        is_market: bool = True,
+        limit_px: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Place a trigger order (stop/tp). Supports stop-market; attempts stop-limit if is_market=False and limit_px is set.
+        """
+        if self._exchange is None or self._info is None:
+            logger.warning("HyperliquidTestnetExecutionAdapter: SDK not initialized, cannot place trigger order")
+            return {"status": "error", "reason": "sdk_not_initialized"}
+
+        if not is_market and limit_px is None:
+            logger.info("HyperliquidTestnetExecutionAdapter: stop-limit requested without limit_px; falling back to stop-market")
+            is_market = True
+
+        limit_price = float(limit_px if limit_px is not None else trigger_px)
+        order = {
+            "coin": _normalize_symbol(symbol),
+            "is_buy": bool(is_buy),
+            "sz": float(sz),
+            "limit_px": limit_price,
+            "order_type": {"trigger": {"triggerPx": float(trigger_px), "isMarket": bool(is_market), "tpsl": tpsl}},
+            "reduce_only": bool(reduce_only),
+        }
+        # Developer note: HL stop-limit uses isMarket=False + limit_px; some venues may ignore stop-limits.
+
+        try:
+            resp = self._exchange.place_order(order)
+        except Exception as e:
+            logger.error("HyperliquidTestnetExecutionAdapter: place_trigger_order failed: %s", e, exc_info=True)
+            return {"status": "error", "reason": str(e)}
+
+        oid = _extract_oid_from_response(resp)
+        if oid is not None:
+            resp = dict(resp)
+            resp["oid"] = oid
+        return resp
+
+    def place_tw5_bracket(
+        self,
+        coin: str,
+        side: str,
+        total_size: float,
+        stop_price: float,
+        tp_levels: List[tuple],
+    ) -> Dict[str, Any]:
+        """
+        Place a TW-5 style bracket: reduce-only stop + up to 3 reduce-only limit TPs.
+        Returns a dict with stop_oid and list of tp_oids (missing if placement failed).
+        """
+        side_norm = (side or "").lower()
+        if side_norm not in ("long", "short"):
+            raise ValueError("side must be 'long' or 'short'")
+
+        close_is_buy = side_norm == "short"
+
+        result: Dict[str, Any] = {"stop_oid": None, "tp_oids": []}
+
+        stop_resp = self.place_trigger_order(
+            symbol=coin,
+            is_buy=close_is_buy,
+            sz=total_size,
+            trigger_px=stop_price,
+            reduce_only=True,
+            tpsl="sl",
+            is_market=True,
+            limit_px=stop_price,
+        )
+        result["stop_oid"] = _extract_oid_from_response(stop_resp)
+
+        for price, size in tp_levels:
+            tp_resp = self.place_limit_order(
+                symbol=coin,
+                is_buy=close_is_buy,
+                sz=size,
+                limit_px=price,
+                reduce_only=True,
+                tif="Gtc",
+            )
+            result["tp_oids"].append(_extract_oid_from_response(tp_resp))
+
+        return result
 
     def health_check(self) -> bool:
         """

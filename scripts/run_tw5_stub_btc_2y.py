@@ -21,7 +21,11 @@ if str(ROOT) not in sys.path:
 
 from config import Config
 from enums import ExecutionMode
-from tw5.replay import run_tw5_replay_from_candles, export_tw5_replay_to_run_folder
+from tw5.replay import (
+    export_tw5_replay_to_run_folder,
+    run_tw5_replay_from_candles,
+    run_tw5_replay_with_pnl_from_candles,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -35,6 +39,11 @@ def _parse_args() -> argparse.Namespace:
         "--run-id",
         default="tw5_stub_btc_2y",
         help="Run identifier for export folder (default: tw5_stub_btc_2y).",
+    )
+    parser.add_argument(
+        "--pnl",
+        action="store_true",
+        help="If set, run PnL replay (with stops/TP ladder) instead of structural-only.",
     )
     return parser.parse_args()
 
@@ -127,18 +136,28 @@ def main() -> None:
     config = _build_config()
     initial_state: Dict[str, Any] = {}
 
-    ticks = run_tw5_replay_from_candles(
-        candles=candles,
-        config=config,
-        initial_state=initial_state,
-        use_stub=True,
-        warmup_bars=500,
-    )
+    if args.pnl:
+        ticks, stats = run_tw5_replay_with_pnl_from_candles(
+            candles=candles,
+            config=config,
+            initial_state=initial_state,
+            use_stub=True,
+            warmup_bars=500,
+        )
+    else:
+        ticks = run_tw5_replay_from_candles(
+            candles=candles,
+            config=config,
+            initial_state=initial_state,
+            use_stub=True,
+            warmup_bars=500,
+        )
+        stats = None
 
     run_path = export_tw5_replay_to_run_folder(
         ticks=ticks,
         config=config,
-        stats=None,
+        stats=stats,
         run_id=run_id,
         base_dir="analytics/runs",
         source_path=str(candle_path),
@@ -149,7 +168,11 @@ def main() -> None:
     print(f"TW-5 stub replay complete.")
     print(f"run_id: {run_id}")
     print(f"run folder: {run_path}")
-    print(f"ticks: {len(ticks)} | final_equity (no PnL sim): {config.initial_equity:.2f}")
+    print(f"ticks: {len(ticks)}")
+    if stats:
+        print(f"final_equity: {config.initial_equity + stats.total_pnl:.2f} | trades: {stats.trade_count}")
+    else:
+        print(f"final_equity (no PnL sim): {config.initial_equity:.2f}")
 
 
 if __name__ == "__main__":

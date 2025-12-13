@@ -101,7 +101,9 @@ Classic spine:
 - config.py  
   Runtime config (symbol, risk caps, intervals, paths, testnet mode, initial equity). Environment-agnostic:
   does not read .env files. All secrets enter via OS env. `load_testnet_config()` builds a Hyperliquid testnet Config
-  with conservative risk and `state_testnet.json` as the state file.
+  with conservative risk and `state_testnet.json` as the state file. TW-5 execution defaults (manage cadence, TP
+  R-multipliers, remaining fractions → absolute sizing, trailing stops, stop order mode/offset, market-entry safety)
+  are env-overridable for convenience.
 
 - engine.py  
   Main live/demo loop. Exports:
@@ -156,7 +158,10 @@ Classic spine:
   Data + execution adapters:
   - `mock_data_adapter.py`, `mock_execution_adapter.py` – local SIM.
   - `liqdata.py` – Hyperliquid data (testnet/mainnet endpoints, but only testnet is wired in runners).
-  - `liqexec.py` – Hyperliquid testnet execution via current SDK and `HL_TESTNET_PRIVATE_KEY` env var.
+  - `liqexec.py` – Hyperliquid testnet execution via current SDK and `HL_TESTNET_PRIVATE_KEY` env var. Classic
+    `place_order` remains market-only; helper surface supports account value, open-order fetch, targeted bulk
+    cancel, limit orders (`order_type={"limit": {"tif": ...}}`), trigger orders (stop-market by default, stop-limit
+    when supported), and TW-5 brackets (reduce-only stop + 3 reduce-only limit TPs).
   - replay helpers for offline backtests.
 
 - replay.py  
@@ -240,6 +245,13 @@ TW-5 modules (`tw5/`):
   - builds 1R/2R TP ladders per leg
   - leaves notional sizing to the risk clamp.
 
+- `tw5/exit_rules.py`
+  Pure helpers (no I/O):
+  - converts human “close % of remaining” ladders into absolute fractions that sum to ~1.0
+  - builds TP price/size tuples from entry/stop, side, and R-multipliers
+  - computes monotonic trailing stops (never widens) using TW-5 trailing config (early tighten, post-TP1/TP2 floors, runner giveback)
+  TPLevel.size_frac is interpreted as an absolute fraction of original size even if human plans describe “% of remaining”.
+
 - `tw5/gatekeeper.py`  
   Simple TW-5 wake-up logic:
   - snapshot sanity (price > 0, vol_mode known, at least one trend known)
@@ -285,18 +297,24 @@ TW-5 modules (`tw5/`):
   - `TickResult` dataclass summarises snapshot, plan, clamp_result, execution_result, and gatekeeper status.
 
 - `tw5/executor.py`  
-  Skeleton for a future TW-5 execution adapter wrapper (currently no-op).
+  TW-5 execution wrapper (testnet-safe):
+  - maintains lightweight execution state in `state["tw5_exec"]`
+  - enters via market order (MVP) when clamped plan approved
+  - places reduce-only stop trigger + 3 reduce-only limit TPs from `exit_rules`
+  - periodic trailing stop tightening (never widens), default cadence 180s
+  - reconciles on restart by querying open position/orders and re-placing missing exits; cancels orphan oids when flat.
 
 - `tw5/replay.py`
   TW-5 replay harness with realistic limit order simulation:
   - Loads candles from CSV or in-memory sequences
   - Runs structural replay (no PnL): candles → Tw5Snapshot → gatekeeper → GPT/stub → risk_clamp → TickResult[]
-  - Runs PnL replay with persistent limit orders:
+  - Runs PnL replay with persistent limit orders + live-mirrored exits:
     - Tracks pending orders across bars (PendingOrder dataclass)
     - Orders expire after configurable lifetime (default: 100 bars)
     - Fills when entry price touched within bar's OHLC range
-    - Gap-aware stop/TP execution with slippage (3 bps) and fees (4 bps per side)
-    - One position at a time, max hold bars enforcement
+    - Gap-aware stop/TP ladder execution with slippage (3 bps) and fees (4 bps per side)
+    - TP ladder uses absolute fractions of original size (e.g., 0.30 / 0.21 / 0.49) and trailing stop rules from `exit_rules`, managed at configurable cadence
+    - One position at a time, max hold bars enforcement, partial fills tracked with optional fills JSONL export
   - Returns replay statistics: equity curve, trade list, win rate, avg R, max drawdown.
 
 5. Core Contracts

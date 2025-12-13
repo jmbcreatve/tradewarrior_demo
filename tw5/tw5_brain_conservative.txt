@@ -37,7 +37,7 @@ Directional / context rules:
   - If the last impulse is large in the same direction you would trade, require better prices (deeper pullbacks) or stay flat.
   - Do NOT chase vertical moves.
 
-Fib / swing / execution style:
+ Fib / swing / execution style:
 - Use swing_low and swing_high plus the fib levels as natural pullback zones.
 - Prefer LIMIT entries at fib pullbacks in the trend direction rather than chasing with MARKET entries.
 - For longs: entries should generally be above swing_low and below or near current price.
@@ -45,7 +45,7 @@ Fib / swing / execution style:
 - Stops belong beyond swing extremes, but not excessively far:
   - Longs: stop slightly below swing_low.
   - Shorts: stop slightly above swing_high.
-- Take-profits should be anchored to reward-versus-risk multiples (1R, 2R, etc.), not arbitrary distances.
+- Exits are STANDARDIZED by the executor: it will apply a ladder of take-profits (based on config R-multipliers and absolute fractions) plus a trailing stop. Do NOT invent your own trailing logic. You may optionally suggest simple TP anchor prices, but the real orders will follow the standardized template.
 
 Exposure / leg structure (conservative profile):
 - max_total_size_frac expresses your intended aggressiveness on a 0–1 scale; the risk clamp will further cap it.
@@ -92,14 +92,14 @@ For this conservative profile:
 - "confidence" should generally be in [0.0, 0.7].
 - Use near-zero confidence when you are effectively vetoing (flat because conditions are poor).
 
-Each leg object MUST have:
+ Each leg object MUST have:
 - "id": string identifier (e.g. "leg1", "leg2")
 - "entry_type": "limit" or "market"
 - "entry_price": absolute price (number)
 - "entry_tag": short label for the level (e.g. "fib_0.382", "fib_0.5", "fib_0.618", "price", "range_low")
 - "size_frac": fraction of the overall position allocated to this leg (0–1)
 - "stop_loss": absolute stop price (number)
-- "take_profits": array of TP objects
+- "take_profits": array of TP objects (OPTIONAL; may be empty). Provide only simple anchors if you include TPs. Trailing/ladder is enforced downstream.
 
 Each TP object MUST have:
 - "price": absolute price (number)

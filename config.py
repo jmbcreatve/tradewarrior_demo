@@ -15,6 +15,47 @@ def _str_to_bool(val: str) -> bool:
     return val.lower() in ("true", "1", "yes", "on")
 
 
+def _get_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _get_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _get_env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return _str_to_bool(raw)
+
+
+def _get_env_float_list(name: str, default: List[float]) -> List[float]:
+    raw = os.getenv(name)
+    if raw is None:
+        return list(default)
+
+    pieces = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+    try:
+        floats = [float(p) for p in pieces]
+    except ValueError:
+        return list(default)
+
+    return floats if floats else list(default)
+
+
 @dataclass
 class Config:
     """Top-level configuration for the TradeWarrior demo system.
@@ -27,8 +68,9 @@ class Config:
     - Loop timing and paths
 
     All secrets (API keys, private keys) must come from OS environment variables,
-    not from .env files. This class is environment-agnostic and does not read
-    environment variables directly (except for optional GPT model override).
+    not from .env files. This class keeps environment reads minimal: safe TW-5
+    execution defaults and the GPT model can be overridden via env vars for
+    convenience.
 
     Defaults use Hyperliquid for real data, mock execution for safety.
     """
@@ -72,6 +114,41 @@ class Config:
     # Default: "conservative" for safer, flatter trading
     tw5_prompt_profile: str = "conservative"
 
+    # TW-5 execution cadence and exit defaults (env-overridable, demo-safe)
+    tw5_manage_interval_sec: float = field(
+        default_factory=lambda: _get_env_float("TW5_MANAGE_INTERVAL_SEC", 180.0)
+    )
+    tw5_tp_r_multipliers: List[float] = field(
+        default_factory=lambda: _get_env_float_list("TW5_TP_R_MULTIPLIERS", [1.2, 2.0, 3.0])
+    )
+    tw5_tp_remaining_fracs: List[float] = field(
+        default_factory=lambda: _get_env_float_list("TW5_TP_REMAINING_FRACS", [0.30, 0.30, 1.00])
+    )
+    tw5_trail_early_trigger_r: float = field(
+        default_factory=lambda: _get_env_float("TW5_TRAIL_EARLY_TRIGGER_R", 0.7)
+    )
+    tw5_trail_early_stop_r: float = field(
+        default_factory=lambda: _get_env_float("TW5_TRAIL_EARLY_STOP_R", -0.25)
+    )
+    tw5_trail_after_tp1_stop_r: float = field(
+        default_factory=lambda: _get_env_float("TW5_TRAIL_AFTER_TP1_STOP_R", 0.10)
+    )
+    tw5_trail_after_tp2_stop_r: float = field(
+        default_factory=lambda: _get_env_float("TW5_TRAIL_AFTER_TP2_STOP_R", 1.00)
+    )
+    tw5_trail_runner_giveback_r: float = field(
+        default_factory=lambda: _get_env_float("TW5_TRAIL_RUNNER_GIVEBACK_R", 1.0)
+    )
+    tw5_stop_order_mode: str = field(
+        default_factory=lambda: os.getenv("TW5_STOP_ORDER_MODE", "stop_market")
+    )
+    tw5_stop_limit_offset_bps: int = field(
+        default_factory=lambda: _get_env_int("TW5_STOP_LIMIT_OFFSET_BPS", 10)
+    )
+    tw5_live_force_market_entry: bool = field(
+        default_factory=lambda: _get_env_bool("TW5_LIVE_FORCE_MARKET_ENTRY", True)
+    )
+
     # Paths
     state_file: str = "state.json"  # Path to state JSON file
     log_dir: str = "logs"  # Directory for log files
@@ -81,8 +158,9 @@ def load_config(path: str | None = None) -> Config:
     """Return a Config instance with demo-safe defaults or load from a file.
 
     This function is environment-agnostic and MUST NOT read environment variables
-    or .env files. All defaults are safe to run in a local or demo environment
-    with no API keys. Secrets must be provided via OS environment variables at runtime.
+    or .env files beyond the env-aware default factories on Config. All defaults are
+    safe to run in a local or demo environment with no API keys. Secrets must be
+    provided via OS environment variables at runtime.
     """
     if path is None:
         return Config()

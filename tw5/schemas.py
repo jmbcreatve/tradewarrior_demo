@@ -127,6 +127,10 @@ class TPLevel:
     Fields:
         price:      Absolute price for this take-profit target.
         size_frac:  Fraction of the leg's size to close here (0–1).
+                     Human intent is “close X% of remaining”, but implementations
+                     typically convert to absolute fractions of the original size
+                     (e.g. 0.30 / 0.21 / 0.49) for exchange-friendly orders while
+                     preserving the same behaviour.
         tag:        Optional label, e.g. "1R", "2R", "partial_exit".
     """
 
@@ -149,7 +153,10 @@ class OrderLeg:
         entry_tag:   Optional label, e.g. "fib_0.382", "range_low".
         size_frac:   Fraction of the *overall* position size allocated to this leg (0–1).
         stop_loss:   Absolute stop-loss price.
-        take_profits: Ordered list of TP levels for this leg.
+        take_profits: Ordered list of TP levels for this leg. Human-readable plans
+                      may describe “close % of remaining”; executors usually receive
+                      absolute fractions that sum to ~1.0 for compatibility with
+                      risk controls and exchange order sizing.
     """
 
     id: str

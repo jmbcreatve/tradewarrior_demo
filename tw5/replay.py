@@ -34,6 +34,7 @@ from config import Config, load_testnet_config
 from logger_utils import get_logger
 
 from .schemas import Tw5Snapshot, OrderPlan, RiskClampResult, PendingOrder
+from .exit_rules import compute_tp_levels, compute_trailing_stop
 from .snapshot_builder import build_tw5_snapshot
 from .stub import generate_tw5_stub_plan
 from .gpt_client import generate_order_plan_with_gpt
@@ -46,6 +47,7 @@ logger = get_logger(__name__)
 # Conservative execution assumptions
 DEFAULT_FEE_RATE = 0.0004        # 4 bps per side
 DEFAULT_SLIPPAGE_BPS = 0.0003    # 3 bps adverse slippage
+DEFAULT_MANAGE_INTERVAL_SEC = 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,7 @@ class Tw5ReplayStats:
 
     equity_curve: List[float]
     trades: List[Dict[str, Any]]
+    fills: List[Dict[str, Any]]
     total_pnl: float
     total_return_pct: float        # fraction, e.g. 0.12 = +12%
     max_drawdown: float            # fraction, e.g. 0.25 = -25% peak-to-trough
@@ -159,6 +162,319 @@ def _max_drawdown(equity_curve: List[float]) -> float:
     return max_dd
 
 
+# ---------------------------------------------------------------------------
+# TW-5 PnL helpers (TP ladder + trailing stops)
+# ---------------------------------------------------------------------------
+
+
+def _build_open_pos(
+    side: str,
+    entry_price: float,
+    stop_loss: float,
+    size: float,
+    tp_levels: Sequence[tuple[float, float, str]],
+    ts: float,
+    equity: float,
+    risk_value: float,
+    snapshot: Any,
+    gpt_called: bool,
+    gpt_reason: str,
+    clamp_reason: str,
+    fee_rate: float,
+) -> Dict[str, Any]:
+    entry_fee = fee_rate * abs(entry_price * size)
+    tps = [
+        {"price": price, "size": abs_frac * size, "tag": tag, "hit": False}
+        for price, abs_frac, tag in tp_levels
+    ]
+    return {
+        "side": side,
+        "entry_price": entry_price,
+        "stop_initial": stop_loss,
+        "stop_current": stop_loss,
+        "size_initial": size,
+        "remaining_size": size,
+        "tp_levels": tps,
+        "entry_ts": ts,
+        "entry_equity": equity,
+        "risk_value": risk_value,
+        "entry_snapshot": snapshot,
+        "entry_gpt_called": gpt_called,
+        "entry_gpt_reason": gpt_reason,
+        "entry_clamp_reason": clamp_reason,
+        "realized_pnl": 0.0,
+        "realized_fees": entry_fee,
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "tp3_hit": False,
+        "high_water_price": entry_price,
+        "last_manage_bar_idx": 0,
+        "max_favorable_R": 0.0,
+        "exit_fills": [],
+    }
+
+
+def _update_high_water(open_pos: Dict[str, Any], price: float) -> None:
+    side = open_pos["side"]
+    hw = open_pos.get("high_water_price", price)
+    if side == "long":
+        new_hw = max(hw, price)
+    else:
+        new_hw = min(hw, price)
+    open_pos["high_water_price"] = new_hw
+    R = abs(open_pos["entry_price"] - open_pos["stop_initial"])
+    if R > 0:
+        if side == "long":
+            fav_r = (new_hw - open_pos["entry_price"]) / R
+        else:
+            fav_r = (open_pos["entry_price"] - new_hw) / R
+        open_pos["max_favorable_R"] = max(open_pos.get("max_favorable_R", 0.0), fav_r)
+
+
+def _price_path(candle: Dict[str, Any]) -> List[float]:
+    o = _safe_price(candle, "open")
+    h = _safe_price(candle, "high", o)
+    l = _safe_price(candle, "low", o)
+    c = _safe_price(candle, "close", o)
+    path: List[float] = [o]
+    if c >= o:
+        path.extend([h, l, c])
+    else:
+        path.extend([l, h, c])
+    return path
+
+
+def _apply_fill(open_pos: Dict[str, Any], fill_price: float, fill_size: float, fee_rate: float, slippage_bps: float, tag: str, ts: float, exit_reason: str, fills: List[Dict[str, Any]]) -> None:
+    side = open_pos["side"]
+    # Apply adverse slippage
+    if side == "long":
+        px = fill_price * (1.0 - slippage_bps)
+        pnl = (px - open_pos["entry_price"]) * fill_size
+    else:
+        px = fill_price * (1.0 + slippage_bps)
+        pnl = (open_pos["entry_price"] - px) * fill_size
+    fee = fee_rate * abs(px * fill_size)
+    open_pos["remaining_size"] = max(0.0, open_pos["remaining_size"] - fill_size)
+    open_pos["realized_pnl"] += pnl
+    open_pos["realized_fees"] += fee
+    open_pos["exit_fills"].append(
+        {
+            "ts": ts,
+            "price": px,
+            "size": fill_size,
+            "tag": tag,
+            "reason": exit_reason,
+        }
+    )
+    fills.append(
+        {
+            "ts": ts,
+            "price": px,
+            "size": fill_size,
+            "tag": tag,
+            "reason": exit_reason,
+        }
+    )
+
+
+def _tighten_stop(open_pos: Dict[str, Any], desired_stop: float) -> None:
+    side = open_pos["side"]
+    current = open_pos.get("stop_current")
+    if current is None:
+        open_pos["stop_current"] = desired_stop
+        return
+    if side == "long" and desired_stop > current:
+        open_pos["stop_current"] = desired_stop
+    elif side == "short" and desired_stop < current:
+        open_pos["stop_current"] = desired_stop
+
+
+def _process_segment(open_pos: Dict[str, Any], p0: float, p1: float, fee_rate: float, slippage_bps: float, ts: float, fills: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    side = open_pos["side"]
+    remaining = open_pos["remaining_size"]
+    if remaining <= 0.0:
+        return None
+
+    # Gap check at segment start
+    high = max(p0, p1)
+    low = min(p0, p1)
+
+    # Stop logic
+    stop_px = open_pos.get("stop_current")
+
+    # TP list for convenience
+    tps = [tp for tp in open_pos["tp_levels"] if not tp["hit"]]
+
+    stop_px = open_pos.get("stop_current")
+    if stop_px is not None:
+        if side == "long" and p0 <= stop_px:
+            fill_px = min(stop_px, p0, p1)
+            fill_size = open_pos["remaining_size"]
+            _apply_fill(open_pos, fill_px, fill_size, fee_rate, slippage_bps, "stop_loss", ts, "stop_loss", fills)
+            return {"exit_reason": "stop_loss"}
+        if side == "short" and p0 >= stop_px:
+            fill_px = max(stop_px, p0, p1)
+            fill_size = open_pos["remaining_size"]
+            _apply_fill(open_pos, fill_px, fill_size, fee_rate, slippage_bps, "stop_loss", ts, "stop_loss", fills)
+            return {"exit_reason": "stop_loss"}
+
+    if side == "long":
+        if p1 >= p0:
+            # Moving up: fill TPs in ascending order that are crossed
+            for tp in sorted(tps, key=lambda x: x["price"]):
+                if tp["price"] >= min(p0, p1) and tp["price"] <= max(p0, p1):
+                    fill_size = min(tp["size"], open_pos["remaining_size"])
+                    if fill_size > 0:
+                        _apply_fill(open_pos, tp["price"], fill_size, fee_rate, slippage_bps, tp["tag"], ts, "take_profit", fills)
+                        tp["hit"] = True
+                        if tp["tag"].startswith("1"):
+                            open_pos["tp1_hit"] = True
+                        if tp["tag"].startswith("2"):
+                            open_pos["tp2_hit"] = True
+                        if tp["tag"].startswith("3"):
+                            open_pos["tp3_hit"] = True
+            # No stop risk on rising leg
+        else:
+            # Moving down: check stop breach
+            if stop_px is not None and stop_px >= low and stop_px <= high:
+                # Worst-case gap fill at low
+                fill_px = min(stop_px, low)
+                fill_size = open_pos["remaining_size"]
+                _apply_fill(open_pos, fill_px, fill_size, fee_rate, slippage_bps, "stop_loss", ts, "stop_loss", fills)
+                return {"exit_reason": "stop_loss"}
+    else:  # short
+        if p1 <= p0:
+            # Moving down: fill TPs (profits) descending
+            for tp in sorted(tps, key=lambda x: x["price"], reverse=True):
+                if tp["price"] <= max(p0, p1) and tp["price"] >= min(p0, p1):
+                    fill_size = min(tp["size"], open_pos["remaining_size"])
+                    if fill_size > 0:
+                        _apply_fill(open_pos, tp["price"], fill_size, fee_rate, slippage_bps, tp["tag"], ts, "take_profit", fills)
+                        tp["hit"] = True
+                        if tp["tag"].startswith("1"):
+                            open_pos["tp1_hit"] = True
+                        if tp["tag"].startswith("2"):
+                            open_pos["tp2_hit"] = True
+                        if tp["tag"].startswith("3"):
+                            open_pos["tp3_hit"] = True
+        else:
+            # Moving up: stop risk
+            if stop_px is not None and stop_px <= high and stop_px >= low:
+                fill_px = max(stop_px, high)
+                fill_size = open_pos["remaining_size"]
+                _apply_fill(open_pos, fill_px, fill_size, fee_rate, slippage_bps, "stop_loss", ts, "stop_loss", fills)
+                return {"exit_reason": "stop_loss"}
+
+    if open_pos["remaining_size"] <= 1e-9:
+        return {"exit_reason": "take_profit"}
+
+    return None
+
+
+def _manage_and_process_bar(
+    open_pos: Dict[str, Any],
+    candle: Dict[str, Any],
+    ts: float,
+    bar_idx: int,
+    manage_every: int,
+    fee_rate: float,
+    slippage_bps: float,
+    config: Config,
+    fills: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """
+    Apply trailing stop cadence and process intrabar path for TP/stop fills.
+    Returns a trade dict on exit else None.
+    """
+    # Trailing stop cadence
+    last_manage = open_pos.get("last_manage_bar_idx", 0)
+    if manage_every > 0 and (bar_idx - last_manage) >= manage_every:
+        desired = compute_trailing_stop(
+            entry=open_pos["entry_price"],
+            initial_stop=open_pos["stop_initial"],
+            side=open_pos["side"],
+            R=abs(open_pos["entry_price"] - open_pos["stop_initial"]),
+            high_water_price=open_pos.get("high_water_price", open_pos["entry_price"]),
+            tp1_hit=open_pos.get("tp1_hit", False),
+            tp2_hit=open_pos.get("tp2_hit", False),
+            cfg=config,
+        )
+        _tighten_stop(open_pos, desired)
+        open_pos["last_manage_bar_idx"] = bar_idx
+
+    # Process price path
+    path = _price_path(candle)
+
+    # Instant gap checks at first price
+    _update_high_water(open_pos, path[0])
+    gap_exit = _process_segment(open_pos, path[0], path[0], fee_rate, slippage_bps, ts, fills)
+    if gap_exit:
+        return _finalize_trade(open_pos, ts, gap_exit["exit_reason"])
+
+    for i in range(1, len(path)):
+        seg_exit = _process_segment(open_pos, path[i - 1], path[i], fee_rate, slippage_bps, ts, fills)
+        _update_high_water(open_pos, path[i])
+        if seg_exit:
+            return _finalize_trade(open_pos, ts, seg_exit["exit_reason"])
+
+    # Time expiry check
+    # handled by caller via max_hold_bars; no additional action here
+    return None
+
+
+def _force_exit(
+    open_pos: Dict[str, Any],
+    price: float,
+    ts: float,
+    fee_rate: float,
+    slippage_bps: float,
+    fills: List[Dict[str, Any]],
+    reason: str,
+) -> Dict[str, Any]:
+    remaining = open_pos.get("remaining_size", 0.0)
+    if remaining > 0.0:
+        _apply_fill(open_pos, price, remaining, fee_rate, slippage_bps, reason, ts, reason, fills)
+    return _finalize_trade(open_pos, ts, reason)
+
+
+def _finalize_trade(open_pos: Dict[str, Any], exit_ts: float, exit_reason: str) -> Dict[str, Any]:
+    size_initial = open_pos["size_initial"]
+    pnl = open_pos["realized_pnl"] - open_pos["realized_fees"]
+    ret_pct = pnl / open_pos["entry_equity"] if open_pos["entry_equity"] > 0 else 0.0
+    r_mult = pnl / open_pos["risk_value"] if open_pos["risk_value"] > 0 else 0.0
+    last_fill_price = open_pos["exit_fills"][-1]["price"] if open_pos["exit_fills"] else open_pos["entry_price"]
+    snap = open_pos.get("entry_snapshot")
+    return {
+        "side": open_pos["side"],
+        "entry_ts": open_pos["entry_ts"],
+        "exit_ts": exit_ts,
+        "entry_price": open_pos["entry_price"],
+        "exit_price": last_fill_price,
+        "size": size_initial,
+        "pnl": pnl,
+        "return_pct": ret_pct,
+        "R": r_mult,
+        "exit_reason": exit_reason,
+        "tp1_hit": open_pos.get("tp1_hit", False),
+        "tp2_hit": open_pos.get("tp2_hit", False),
+        "tp3_hit": open_pos.get("tp3_hit", False),
+        "max_favorable_R": open_pos.get("max_favorable_R", 0.0),
+        "stop_initial": open_pos.get("stop_initial"),
+        "stop_final": open_pos.get("stop_current"),
+        "pnl_realized": open_pos.get("realized_pnl"),
+        "fees_paid": open_pos.get("realized_fees"),
+        "trend_1h": getattr(snap, "trend_1h", None),
+        "trend_4h": getattr(snap, "trend_4h", None),
+        "range_position_7d": getattr(snap, "range_position_7d", None),
+        "vol_mode": getattr(snap, "vol_mode", None),
+        "last_impulse_direction": getattr(snap, "last_impulse_direction", None),
+        "last_impulse_size_pct": getattr(snap, "last_impulse_size_pct", None),
+        "gpt_called": open_pos.get("entry_gpt_called"),
+        "gpt_reason": open_pos.get("entry_gpt_reason"),
+        "clamp_reason": open_pos.get("entry_clamp_reason"),
+    }
+
+
 def _resolve_exit(position: Dict[str, Any], candle: Dict[str, Any]) -> Tuple[float, str]:
     """
     Decide exit price for a single bar, honoring stop/take-profit if hit.
@@ -206,6 +522,19 @@ def _effective_risk_per_trade_pct(config: Config) -> float:
     """
     base = _safe_float(getattr(config, "risk_per_trade", 0.0), 0.0) or 0.0
     return float(base)
+
+
+def _bar_seconds(candles: Sequence[Dict[str, Any]]) -> float:
+    if len(candles) >= 2:
+        try:
+            t0 = float(candles[0].get("timestamp", 0.0))
+            t1 = float(candles[1].get("timestamp", t0))
+            delta = t1 - t0
+            if delta > 0:
+                return delta
+        except Exception:
+            pass
+    return 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +710,7 @@ def run_tw5_replay_with_pnl_from_candles(
         stats = Tw5ReplayStats(
             equity_curve=[],
             trades=[],
+            fills=[],
             total_pnl=0.0,
             total_return_pct=0.0,
             max_drawdown=0.0,
@@ -394,6 +724,7 @@ def run_tw5_replay_with_pnl_from_candles(
     equity = equity_start
     equity_curve: List[float] = [equity]
     trades: List[Dict[str, Any]] = []
+    fills: List[Dict[str, Any]] = []
 
     risk_pct = _effective_risk_per_trade_pct(config)
     if risk_pct <= 0.0:
@@ -405,12 +736,15 @@ def run_tw5_replay_with_pnl_from_candles(
     open_pos: Dict[str, Any] | None = None
     bars_in_trade = 0
     pending_orders: List[PendingOrder] = []
+    bar_seconds = _bar_seconds(candles)
+    manage_every = max(1, int(round(getattr(config, "tw5_manage_interval_sec", DEFAULT_MANAGE_INTERVAL_SEC) / bar_seconds)))
 
     for idx, (candle, tick) in enumerate(zip(candles, ticks)):
         ts = float(candle.get("timestamp", 0.0))
         high = _safe_price(candle, "high")
         low = _safe_price(candle, "low")
         close = _safe_price(candle, "close")
+        open_price = _safe_price(candle, "open")
 
         # 0) Check pending limit orders for fills (only if flat and risk configured)
         if open_pos is None and risk_pct > 0.0:
@@ -507,93 +841,77 @@ def run_tw5_replay_with_pnl_from_candles(
                     if risk_value > 0.0 and risk_per_unit > 0.0:
                         size = risk_value / risk_per_unit
                         if size > 0.0:
-                            # Open the position
-                            open_pos = {
-                                "side": cp.side,
-                                "entry_price": entry_price,
-                                "size": size,
-                                "stop_loss": stop_loss,
-                                "take_profit": take_profit,
-                                "entry_ts": ts,
-                                "entry_equity": equity,
-                                "risk_value": risk_value,
-                                "entry_snapshot": entry_snapshot,
-                                "entry_gpt_called": entry_gpt_called,
-                                "entry_gpt_reason": entry_gpt_reason,
-                                "entry_clamp_reason": entry_clamp_reason,
-                            }
+                            tp_levels = compute_tp_levels(
+                                entry=entry_price,
+                                stop=stop_loss,
+                                side=cp.side,
+                                r_mults=getattr(config, "tw5_tp_r_multipliers", [1.2, 2.0, 3.0]),
+                                remaining_fracs=getattr(config, "tw5_tp_remaining_fracs", [0.30, 0.30, 1.0]),
+                            )
+                            open_pos = _build_open_pos(
+                                side=cp.side,
+                                entry_price=entry_price,
+                                stop_loss=stop_loss,
+                                size=size,
+                                tp_levels=tp_levels,
+                                ts=ts,
+                                equity=equity,
+                                risk_value=risk_value,
+                                snapshot=entry_snapshot,
+                                gpt_called=entry_gpt_called,
+                                gpt_reason=entry_gpt_reason,
+                                clamp_reason=entry_clamp_reason,
+                                fee_rate=fee_rate,
+                            )
+                            open_pos["last_manage_bar_idx"] = idx
                             bars_in_trade = 0
 
                             # Remove the filled order and cancel all other pending orders
                             pending_orders = []
 
-        # 1) Handle existing position exit first
+        # 1) Handle existing position exit/management first
         if open_pos is not None:
             bars_in_trade += 1
-            exit_raw, exit_reason = _resolve_exit(open_pos, candle)
+            exit_result = _manage_and_process_bar(
+                open_pos=open_pos,
+                candle=candle,
+                ts=ts,
+                bar_idx=idx,
+                manage_every=manage_every,
+                fee_rate=fee_rate,
+                slippage_bps=slippage_bps,
+                config=config,
+                fills=fills,
+            )
 
-            time_expired = max_hold_bars > 0 and bars_in_trade > max_hold_bars
-            if time_expired and exit_reason == "bar_close":
-                exit_reason = "time_expiry"
-                exit_raw = close
-
-            if exit_reason != "bar_close" or time_expired:
-                # Apply slippage and fees
-                side = open_pos.get("side")
-                size = float(open_pos.get("size", 0.0))
-                entry_price = float(open_pos.get("entry_price", 0.0))
-
-                if side == "long":
-                    exit_price = exit_raw * (1.0 - slippage_bps)
-                else:
-                    exit_price = exit_raw * (1.0 + slippage_bps)
-
-                pnl_gross = _compute_pnl(
-                    {"entry_price": entry_price, "size": size, "side": side},
-                    exit_price,
-                )
-
-                notional_entry = abs(entry_price * size)
-                notional_exit = abs(exit_price * size)
-                fees = fee_rate * (notional_entry + notional_exit)
-                pnl = pnl_gross - fees
-
-                entry_equity = float(open_pos.get("entry_equity", equity))
-                risk_value = float(open_pos.get("risk_value", 0.0))
-
-                ret_pct = pnl / entry_equity if entry_equity > 0 else 0.0
-                r_mult = pnl / risk_value if risk_value > 0 else 0.0
-
+            if exit_result is not None:
+                trade = exit_result
+                pnl = trade["pnl"]
                 equity += pnl
                 equity_curve.append(equity)
-
-                snap = open_pos.get("entry_snapshot")
-                trades.append(
-                    {
-                        "side": side,
-                        "entry_ts": open_pos.get("entry_ts"),
-                        "exit_ts": ts,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "size": size,
-                        "pnl": pnl,
-                        "return_pct": ret_pct,
-                        "R": r_mult,
-                        "exit_reason": exit_reason,
-                        "trend_1h": getattr(snap, "trend_1h", None),
-                        "trend_4h": getattr(snap, "trend_4h", None),
-                        "range_position_7d": getattr(snap, "range_position_7d", None),
-                        "vol_mode": getattr(snap, "vol_mode", None),
-                        "last_impulse_direction": getattr(snap, "last_impulse_direction", None),
-                        "last_impulse_size_pct": getattr(snap, "last_impulse_size_pct", None),
-                        "gpt_called": open_pos.get("entry_gpt_called"),
-                        "gpt_reason": open_pos.get("entry_gpt_reason"),
-                        "clamp_reason": open_pos.get("entry_clamp_reason"),
-                    }
-                )
-
+                trades.append(trade)
                 open_pos = None
                 bars_in_trade = 0
+                # After exit, skip entry on same bar
+                continue
+            time_expired = max_hold_bars > 0 and bars_in_trade > max_hold_bars
+            if time_expired and open_pos is not None:
+                exit_trade = _force_exit(
+                    open_pos,
+                    price=close,
+                    ts=ts,
+                    fee_rate=fee_rate,
+                    slippage_bps=slippage_bps,
+                    fills=fills,
+                    reason="time_expiry",
+                )
+                pnl = exit_trade["pnl"]
+                equity += pnl
+                equity_curve.append(equity)
+                trades.append(exit_trade)
+                open_pos = None
+                bars_in_trade = 0
+                continue
 
         # 2) Consider new entry only if flat and risk is configured
         if open_pos is not None or risk_pct <= 0.0:
@@ -674,20 +992,29 @@ def run_tw5_replay_with_pnl_from_candles(
                 if risk_value > 0.0 and risk_per_unit > 0.0:
                     size = risk_value / risk_per_unit
                     if size > 0.0:
-                        open_pos = {
-                            "side": cp.side,
-                            "entry_price": entry_price,
-                            "size": size,
-                            "stop_loss": stop_loss,
-                            "take_profit": take_profit,
-                            "entry_ts": ts,
-                            "entry_equity": equity,
-                            "risk_value": risk_value,
-                            "entry_snapshot": entry_snapshot,
-                            "entry_gpt_called": entry_gpt_called,
-                            "entry_gpt_reason": entry_gpt_reason,
-                            "entry_clamp_reason": entry_clamp_reason,
-                        }
+                        tp_levels = compute_tp_levels(
+                            entry=entry_price,
+                            stop=stop_loss,
+                            side=cp.side,
+                            r_mults=getattr(config, "tw5_tp_r_multipliers", [1.2, 2.0, 3.0]),
+                            remaining_fracs=getattr(config, "tw5_tp_remaining_fracs", [0.30, 0.30, 1.0]),
+                        )
+                        open_pos = _build_open_pos(
+                            side=cp.side,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            size=size,
+                            tp_levels=tp_levels,
+                            ts=ts,
+                            equity=equity,
+                            risk_value=risk_value,
+                            snapshot=entry_snapshot,
+                            gpt_called=entry_gpt_called,
+                            gpt_reason=entry_gpt_reason,
+                            clamp_reason=entry_clamp_reason,
+                            fee_rate=fee_rate,
+                        )
+                        open_pos["last_manage_bar_idx"] = idx
                         bars_in_trade = 0
 
                         # Cancel any pending orders since we just entered
@@ -713,61 +1040,18 @@ def run_tw5_replay_with_pnl_from_candles(
         last_candle = candles[-1]
         last_ts = float(last_candle.get("timestamp", 0.0))
         last_close = _safe_price(last_candle, "close", open_pos.get("entry_price", 0.0))
-        exit_raw, exit_reason = _resolve_exit(open_pos, last_candle)
-        if exit_reason == "bar_close":
-            exit_reason = "end_of_data"
-            exit_raw = last_close
-
-        side = open_pos.get("side")
-        size = float(open_pos.get("size", 0.0))
-        entry_price = float(open_pos.get("entry_price", 0.0))
-
-        if side == "long":
-            exit_price = exit_raw * (1.0 - slippage_bps)
-        else:
-            exit_price = exit_raw * (1.0 + slippage_bps)
-
-        pnl_gross = _compute_pnl(
-            {"entry_price": entry_price, "size": size, "side": side},
-            exit_price,
+        exit_trade = _force_exit(
+            open_pos,
+            price=last_close,
+            ts=last_ts,
+            fee_rate=fee_rate,
+            slippage_bps=slippage_bps,
+            fills=fills,
+            reason="end_of_data",
         )
-        notional_entry = abs(entry_price * size)
-        notional_exit = abs(exit_price * size)
-        fees = fee_rate * (notional_entry + notional_exit)
-        pnl = pnl_gross - fees
-
-        entry_equity = float(open_pos.get("entry_equity", equity))
-        risk_value = float(open_pos.get("risk_value", 0.0))
-        ret_pct = pnl / entry_equity if entry_equity > 0 else 0.0
-        r_mult = pnl / risk_value if risk_value > 0 else 0.0
-
-        equity += pnl
+        equity += exit_trade["pnl"]
         equity_curve.append(equity)
-
-        snap = open_pos.get("entry_snapshot")
-        trades.append(
-            {
-                "side": side,
-                "entry_ts": open_pos.get("entry_ts"),
-                "exit_ts": last_ts,
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "size": size,
-                "pnl": pnl,
-                "return_pct": ret_pct,
-                "R": r_mult,
-                "exit_reason": exit_reason,
-                "trend_1h": getattr(snap, "trend_1h", None),
-                "trend_4h": getattr(snap, "trend_4h", None),
-                "range_position_7d": getattr(snap, "range_position_7d", None),
-                "vol_mode": getattr(snap, "vol_mode", None),
-                "last_impulse_direction": getattr(snap, "last_impulse_direction", None),
-                "last_impulse_size_pct": getattr(snap, "last_impulse_size_pct", None),
-                "gpt_called": open_pos.get("entry_gpt_called"),
-                "gpt_reason": open_pos.get("entry_gpt_reason"),
-                "clamp_reason": open_pos.get("entry_clamp_reason"),
-            }
-        )
+        trades.append(exit_trade)
 
     trade_count = len(trades)
     total_pnl = sum(t["pnl"] for t in trades)
@@ -785,6 +1069,7 @@ def run_tw5_replay_with_pnl_from_candles(
     stats = Tw5ReplayStats(
         equity_curve=equity_curve,
         trades=trades,
+        fills=fills,
         total_pnl=total_pnl,
         total_return_pct=total_return_pct,
         max_drawdown=max_dd,
@@ -867,6 +1152,12 @@ def export_tw5_replay_to_run_folder(
         for entry in parity_entries:
             f.write(json.dumps(entry) + "\n")
 
+    if stats and getattr(stats, "fills", None):
+        fills_path = run_path / "trades_fills.jsonl"
+        with fills_path.open("w", encoding="utf-8") as f:
+            for fill in stats.fills:
+                f.write(json.dumps(fill) + "\n")
+
     trades: List[Dict[str, Any]] = list(stats.trades) if stats and stats.trades is not None else []
     equity_curve = list(stats.equity_curve) if stats and stats.equity_curve else []
     if not equity_curve:
@@ -885,6 +1176,14 @@ def export_tw5_replay_to_run_folder(
         "return_pct",
         "R",
         "exit_reason",
+        "tp1_hit",
+        "tp2_hit",
+        "tp3_hit",
+        "max_favorable_R",
+        "stop_initial",
+        "stop_final",
+        "pnl_realized",
+        "fees_paid",
     ]
     trade_defaults = {field: 0 for field in trade_fields}
     trade_defaults.update({"side": "", "exit_reason": ""})
@@ -899,6 +1198,12 @@ def export_tw5_replay_to_run_folder(
                     value = trade.get(field, trade_defaults[field])
                     row[field] = value if value not in {None, ""} else trade_defaults[field]
             writer.writerow(row)
+
+    if stats and getattr(stats, "fills", None):
+        fills_path = run_path / "trades_fills.jsonl"
+        with fills_path.open("w", encoding="utf-8") as f:
+            for fill in stats.fills:
+                f.write(json.dumps(fill) + "\n")
 
     equity_path = run_path / "equity.csv"
     with equity_path.open("w", newline="", encoding="utf-8") as f:

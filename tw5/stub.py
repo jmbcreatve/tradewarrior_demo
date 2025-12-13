@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional, List
 
-from .schemas import Tw5Snapshot, OrderPlan, OrderLeg, TPLevel
+from .schemas import Tw5Snapshot, OrderPlan, OrderLeg
 
 
 def generate_tw5_stub_plan(snapshot: Tw5Snapshot, seed: Optional[int] = None) -> OrderPlan:
@@ -88,7 +88,7 @@ def _build_stub_long_plan(snapshot: Tw5Snapshot) -> OrderPlan:
 
     legs: List[OrderLeg] = []
     for idx, (entry_price, size_frac) in enumerate(zip(entries, size_fracs), start=1):
-        stop_loss, tp_levels = _make_risk_long(snapshot, entry_price)
+        stop_loss = _make_stop_long(snapshot, entry_price)
         leg = OrderLeg(
             id=f"leg_long_{idx}",
             entry_type="limit",
@@ -96,13 +96,13 @@ def _build_stub_long_plan(snapshot: Tw5Snapshot) -> OrderPlan:
             entry_tag=_long_entry_tag_for_level(snapshot, entry_price),
             size_frac=size_frac,
             stop_loss=stop_loss,
-            take_profits=tp_levels,
+            take_profits=[],  # exits are standardized by executor (ladder + trailing)
         )
         legs.append(leg)
 
     rationale = (
-        "Stub: follow 4h uptrend with fib-based pullback entries and "
-        "1R/2R take-profit ladder. Risk/size will be clamped downstream."
+        "Stub: follow 4h uptrend with fib-based pullback entries and swing-based stops. "
+        "Exit ladder/trailing handled by executor."
     )
 
     return OrderPlan(
@@ -115,10 +115,8 @@ def _build_stub_long_plan(snapshot: Tw5Snapshot) -> OrderPlan:
     )
 
 
-def _make_risk_long(snapshot: Tw5Snapshot, entry_price: float) -> tuple[float, List[TPLevel]]:
-    """
-    For a long, place stop below swing_low and TPs at 1R and 2R.
-    """
+def _make_stop_long(snapshot: Tw5Snapshot, entry_price: float) -> float:
+    """For a long, place stop below swing_low."""
     swing_low = snapshot.swing_low
     # Base risk distance: at least 0.5% of price, but also respect ATR.
     min_risk = 0.005 * snapshot.price
@@ -137,16 +135,7 @@ def _make_risk_long(snapshot: Tw5Snapshot, entry_price: float) -> tuple[float, L
     if per_unit_risk <= 0:
         # Degenerate; fall back to tiny risk
         per_unit_risk = max(0.001 * snapshot.price, 1.0)
-
-    # 1R and 2R take profits
-    tp1 = entry_price + per_unit_risk
-    tp2 = entry_price + 2.0 * per_unit_risk
-
-    tps = [
-        TPLevel(price=tp1, size_frac=0.5, tag="1R"),
-        TPLevel(price=tp2, size_frac=0.5, tag="2R"),
-    ]
-    return stop_loss, tps
+    return stop_loss
 
 
 def _long_entry_tag_for_level(snapshot: Tw5Snapshot, level: float) -> str:
@@ -201,7 +190,7 @@ def _build_stub_short_plan(snapshot: Tw5Snapshot) -> OrderPlan:
 
     legs: List[OrderLeg] = []
     for idx, (entry_price, size_frac) in enumerate(zip(entries, size_fracs), start=1):
-        stop_loss, tp_levels = _make_risk_short(snapshot, entry_price)
+        stop_loss = _make_stop_short(snapshot, entry_price)
         leg = OrderLeg(
             id=f"leg_short_{idx}",
             entry_type="limit",
@@ -209,13 +198,13 @@ def _build_stub_short_plan(snapshot: Tw5Snapshot) -> OrderPlan:
             entry_tag=_short_entry_tag_for_level(snapshot, entry_price),
             size_frac=size_frac,
             stop_loss=stop_loss,
-            take_profits=tp_levels,
+            take_profits=[],  # exits are standardized by executor (ladder + trailing)
         )
         legs.append(leg)
 
     rationale = (
-        "Stub: follow 4h downtrend with fib-based pullback shorts and "
-        "1R/2R take-profit ladder. Risk/size will be clamped downstream."
+        "Stub: follow 4h downtrend with fib-based pullback shorts and swing-based stops. "
+        "Exit ladder/trailing handled by executor."
     )
 
     return OrderPlan(
@@ -228,10 +217,8 @@ def _build_stub_short_plan(snapshot: Tw5Snapshot) -> OrderPlan:
     )
 
 
-def _make_risk_short(snapshot: Tw5Snapshot, entry_price: float) -> tuple[float, List[TPLevel]]:
-    """
-    For a short, place stop above swing_high and TPs at 1R and 2R.
-    """
+def _make_stop_short(snapshot: Tw5Snapshot, entry_price: float) -> float:
+    """For a short, place stop above swing_high."""
     swing_high = snapshot.swing_high
     min_risk = 0.005 * snapshot.price
     atr_risk = snapshot.atr_pct * snapshot.price * 1.5
@@ -243,16 +230,7 @@ def _make_risk_short(snapshot: Tw5Snapshot, entry_price: float) -> tuple[float, 
     per_unit_risk = stop_loss - entry_price
     if per_unit_risk <= 0:
         per_unit_risk = max(0.001 * snapshot.price, 1.0)
-
-    # 1R and 2R profit to the downside
-    tp1 = entry_price - per_unit_risk
-    tp2 = entry_price - 2.0 * per_unit_risk
-
-    tps = [
-        TPLevel(price=tp1, size_frac=0.5, tag="1R"),
-        TPLevel(price=tp2, size_frac=0.5, tag="2R"),
-    ]
-    return stop_loss, tps
+    return stop_loss
 
 
 def _short_entry_tag_for_level(snapshot: Tw5Snapshot, level: float) -> str:
