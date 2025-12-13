@@ -294,13 +294,11 @@ def _parse_leg(raw: Any) -> Optional[OrderLeg]:
 
         stop_loss = _safe_float(raw.get("stop_loss"), 0.0)
 
+        # Exits are standardized downstream; ignore any provided take_profits.
         tp_raw = raw.get("take_profits") or []
         tps = []
-        if isinstance(tp_raw, list):
-            for t in tp_raw:
-                tp = _parse_tp(t)
-                if tp is not None:
-                    tps.append(tp)
+        if tp_raw:
+            logger.info("TW-5 GPT client: ignored GPT take_profits; standardized ladder applied.")
 
         if entry_price <= 0.0 or stop_loss <= 0.0 or size_frac <= 0.0:
             return None

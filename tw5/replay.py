@@ -47,7 +47,6 @@ logger = get_logger(__name__)
 # Conservative execution assumptions
 DEFAULT_FEE_RATE = 0.0004        # 4 bps per side
 DEFAULT_SLIPPAGE_BPS = 0.0003    # 3 bps adverse slippage
-DEFAULT_MANAGE_INTERVAL_SEC = 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -376,7 +375,7 @@ def _manage_and_process_bar(
     candle: Dict[str, Any],
     ts: float,
     bar_idx: int,
-    manage_every: int,
+    manage_every: float,
     fee_rate: float,
     slippage_bps: float,
     config: Config,
@@ -387,8 +386,8 @@ def _manage_and_process_bar(
     Returns a trade dict on exit else None.
     """
     # Trailing stop cadence
-    last_manage = open_pos.get("last_manage_bar_idx", 0)
-    if manage_every > 0 and (bar_idx - last_manage) >= manage_every:
+    last_manage_ts = open_pos.get("last_manage_ts", 0.0)
+    if manage_every > 0 and (ts - last_manage_ts) >= manage_every:
         desired = compute_trailing_stop(
             entry=open_pos["entry_price"],
             initial_stop=open_pos["stop_initial"],
@@ -400,7 +399,7 @@ def _manage_and_process_bar(
             cfg=config,
         )
         _tighten_stop(open_pos, desired)
-        open_pos["last_manage_bar_idx"] = bar_idx
+        open_pos["last_manage_ts"] = ts
 
     # Process price path
     path = _price_path(candle)
@@ -522,19 +521,6 @@ def _effective_risk_per_trade_pct(config: Config) -> float:
     """
     base = _safe_float(getattr(config, "risk_per_trade", 0.0), 0.0) or 0.0
     return float(base)
-
-
-def _bar_seconds(candles: Sequence[Dict[str, Any]]) -> float:
-    if len(candles) >= 2:
-        try:
-            t0 = float(candles[0].get("timestamp", 0.0))
-            t1 = float(candles[1].get("timestamp", t0))
-            delta = t1 - t0
-            if delta > 0:
-                return delta
-        except Exception:
-            pass
-    return 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -737,7 +723,7 @@ def run_tw5_replay_with_pnl_from_candles(
     bars_in_trade = 0
     pending_orders: List[PendingOrder] = []
     bar_seconds = _bar_seconds(candles)
-    manage_every = max(1, int(round(getattr(config, "tw5_manage_interval_sec", DEFAULT_MANAGE_INTERVAL_SEC) / bar_seconds)))
+    manage_interval_sec = getattr(config, "tw5_manage_interval_sec", 180.0)
 
     for idx, (candle, tick) in enumerate(zip(candles, ticks)):
         ts = float(candle.get("timestamp", 0.0))
@@ -877,7 +863,7 @@ def run_tw5_replay_with_pnl_from_candles(
                 candle=candle,
                 ts=ts,
                 bar_idx=idx,
-                manage_every=manage_every,
+                manage_every=manage_interval_sec,  # no longer used, kept for signature compatibility
                 fee_rate=fee_rate,
                 slippage_bps=slippage_bps,
                 config=config,

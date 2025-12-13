@@ -58,7 +58,7 @@ Directional / context rules:
 - For shorts:
   - Typical entries: fib pullbacks above current price but below swing_high.
   - Stops: above swing_high, reasonably tight.
-- Exits are STANDARDIZED by the executor: it will apply a ladder of take-profits (based on config R-multipliers and absolute fractions) plus a trailing stop. Do NOT invent your own trailing logic. You may optionally suggest simple TP anchor prices, but the real orders will follow the standardized template.
+- Exits are STANDARDIZED by the executor: it will apply a ladder of take-profits (based on config R-multipliers and absolute fractions) plus a trailing stop. Do NOT invent your own trailing logic. Leave take_profits empty ([]) in your output.
 
 Exposure / leg structure (aggressive profile):
 - max_total_size_frac still lives in [0, 1], and the risk clamp will cap it further.
@@ -114,7 +114,7 @@ Each leg object MUST have:
 - "entry_tag": short label for the level (e.g. "fib_0.382", "fib_0.5", "fib_0.618", "price", "breakout_high")
 - "size_frac": fraction of the overall position allocated to this leg (0–1)
 - "stop_loss": absolute stop price (number)
-- "take_profits": array of TP objects (OPTIONAL; may be empty). Provide only simple anchors if you include TPs. Trailing/ladder is enforced downstream.
+- "take_profits": array of TP objects and should normally be empty []. Trailing/ladder is enforced downstream.
 
 Each TP object MUST have:
 - "price": absolute price (number)

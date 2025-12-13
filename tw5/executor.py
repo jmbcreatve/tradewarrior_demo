@@ -46,6 +46,7 @@ class ExecutionState:
     position_size_last_seen: Optional[float] = None
     last_action: str = ""
     last_error: str = ""
+    stop_replace_fail_count: int = 0
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ExecutionState":
@@ -235,14 +236,15 @@ class Tw5Executor:
         """
         Enter a position if flat and plan approved. MVP: market entry + stop/TP ladder.
         """
+        exec_state = self._load_state(state)
+
         halted, reason = check_trading_halted(state)
         if halted:
             logger.warning("TW-5 executor: trading halted (%s); refusing new entries.", reason)
             exec_state.last_error = f"halted:{reason}"
             state[EXEC_STATE_KEY] = exec_state.to_dict()
             return None
-
-        exec_state = self._load_state(state)
+        exec_state.last_error = ""
         if exec_state.in_position:
             return exec_state
 
@@ -365,6 +367,9 @@ class Tw5Executor:
         interval = getattr(config, "tw5_manage_interval_sec", 180.0)
         if not halted and exec_state.last_manage_ts is not None and (now - exec_state.last_manage_ts) < interval:
             return exec_state
+        if halted and exec_state.last_manage_ts is not None and (now - exec_state.last_manage_ts) < interval:
+            # When halted, we still allow tighten-only but keep cadence to avoid spam
+            return exec_state
 
         # Refresh open orders to detect TP hits and current stop price
         hl_orders = self._get_open_orders(exec_state.symbol)
@@ -404,7 +409,13 @@ class Tw5Executor:
             state[EXEC_STATE_KEY] = exec_state.to_dict()
             return exec_state
 
-        # Replace stop with tighter value
+        # Replace stop with tighter value (with backoff)
+        if exec_state.stop_replace_fail_count > 0:
+            # Simple backoff: skip if last failure was recent and we haven't waited interval * fail_count
+            if exec_state.last_manage_ts is not None and (now - exec_state.last_manage_ts) < interval * exec_state.stop_replace_fail_count:
+                state[EXEC_STATE_KEY] = exec_state.to_dict()
+                return exec_state
+
         if exec_state.stop_oid is not None:
             logger.info("TW-5 executor: cancelling old stop oid=%s", exec_state.stop_oid)
             self._cancel_orders(exec_state.symbol, [exec_state.stop_oid])
@@ -423,10 +434,18 @@ class Tw5Executor:
         exec_state.last_manage_ts = now
         exec_state.stop_current = desired_stop
         exec_state.last_action = "stop_tightened"
-        exec_state.last_error = "" if exec_state.stop_oid is not None else "stop_replace_failed"
-        if exec_state.stop_oid is None:
-            logger.critical("TW-5 executor: failed to replace stop; attempting emergency flatten.")
-            self._flatten_market(exec_state.symbol, exec_state.side, exec_state.position_size_last_seen or 0.0)
+        if exec_state.stop_oid is not None:
+            exec_state.last_error = ""
+            exec_state.stop_replace_fail_count = 0
+        else:
+            exec_state.stop_replace_fail_count += 1
+            exec_state.last_error = f"stop_replace_failed:{exec_state.stop_replace_fail_count}"
+            logger.critical(
+                "TW-5 executor: failed to replace stop (fail_count=%d); attempting emergency flatten if above threshold.",
+                exec_state.stop_replace_fail_count,
+            )
+            if exec_state.stop_replace_fail_count >= 3:
+                self._flatten_market(exec_state.symbol, exec_state.side, exec_state.position_size_last_seen or 0.0)
         state[EXEC_STATE_KEY] = exec_state.to_dict()
         return exec_state
 
@@ -473,17 +492,28 @@ class Tw5Executor:
     def _flatten_market(self, symbol: str, side: str, size: float) -> None:
         if size <= 0.0:
             return
-        opposite = "short" if side == "long" else "long"
         try:
-            resp = self._adapter.place_order(
-                symbol=symbol,
-                side=opposite,
-                size=size,
-                order_type="market",
-            )
-            logger.critical("TW-5 executor: EMERGENCY FLATTEN placed resp=%s", resp)
+            if hasattr(self._adapter, "close_position_or_raise"):
+                resp = self._adapter.close_position_or_raise(symbol, sz=size)
+                logger.critical("TW-5 executor: EMERGENCY FLATTEN via close_position_or_raise resp=%s", resp)
+            else:
+                opposite = "short" if side == "long" else "long"
+                resp = self._adapter.place_order(
+                    symbol=symbol,
+                    side=opposite,
+                    size=size,
+                    order_type="market",
+                )
+                logger.critical("TW-5 executor: EMERGENCY FLATTEN via market order resp=%s", resp)
+            positions = self._get_open_positions(symbol)
+            for pos in positions:
+                if pos.get("symbol") == symbol:
+                    sz_left = abs(float(pos.get("size", 0.0)))
+                    if sz_left > 1e-6:
+                        raise RuntimeError(f"flatten_failed: residual size {sz_left}")
         except Exception as e:
             logger.critical("TW-5 executor: EMERGENCY FLATTEN failed: %s", e, exc_info=True)
+            raise
 
 
 def _collect_tracked_oids(exec_state: ExecutionState) -> List[Any]:

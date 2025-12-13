@@ -4,6 +4,7 @@ import pytest
 
 from config import Config
 from tw5.executor import ExecutionState, Tw5Executor
+from tw5.schemas import OrderPlan, OrderLeg
 
 
 class DummyAdapter:
@@ -12,6 +13,8 @@ class DummyAdapter:
         self.open_orders = []
         self.cancelled = []
         self.trigger_orders = []
+        self.limit_orders = []
+        self.market_orders = []
 
     def get_open_positions(self, symbol):
         return list(self.open_positions)
@@ -25,6 +28,18 @@ class DummyAdapter:
     def place_trigger_order(self, **kwargs):
         self.trigger_orders.append(kwargs)
         return {"oid": len(self.trigger_orders)}
+
+    def place_limit_order(self, **kwargs):
+        self.limit_orders.append(kwargs)
+        return {"oid": len(self.limit_orders) + 100}
+
+    def place_order(self, **kwargs):
+        self.market_orders.append(kwargs)
+        return {
+            "status": "filled",
+            "fill_price": kwargs.get("size", 100.0),
+            "order_id": len(self.market_orders) + 1000,
+        }
 
 
 def test_manage_open_position_never_widens_stop():
@@ -84,3 +99,45 @@ def test_sync_reconciliation_clears_stale_state_and_cancels():
     assert cleared.get("side") == "flat"
     assert cleared.get("stop_oid") is None
     assert cleared.get("tp_oids") == {}
+
+
+def test_maybe_enter_from_plan_halted_no_error():
+    """Regression test: ensure exec_state is loaded before halted check."""
+    adapter = DummyAdapter()
+    executor = Tw5Executor(adapter)
+
+    # Create a state that triggers trading_halted
+    state = {"trading_halted": True}
+
+    # Create a valid clamp_result that would normally attempt entry
+    plan = OrderPlan(
+        mode="enter",
+        side="long",
+        legs=[
+            OrderLeg(
+                id="leg1",
+                entry_type="market",
+                entry_price=100.0,
+                entry_tag="test",
+                size_frac=0.5,
+                stop_loss=90.0,
+            )
+        ],
+    )
+    clamp_result = SimpleNamespace(approved=True, clamped_plan=plan)
+
+    snapshot = SimpleNamespace(symbol="BTCUSDT", price=100.0, timestamp=1000.0)
+    cfg = Config()
+
+    # This should not raise NameError
+    result = executor.maybe_enter_from_plan(snapshot, clamp_result, cfg, state)
+
+    # Should return None and not place any orders
+    assert result is None
+    assert adapter.market_orders == []
+    assert adapter.trigger_orders == []
+    assert adapter.limit_orders == []
+
+    # Should record the halt reason in exec_state
+    exec_state = state.get("tw5_exec", {})
+    assert exec_state.get("last_error") == "halted:circuit_breaker_active"

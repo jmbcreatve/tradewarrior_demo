@@ -550,6 +550,32 @@ class HyperliquidTestnetExecutionAdapter(BaseExecutionAdapter):
             logger.error("HyperliquidTestnetExecutionAdapter: bulk_cancel failed: %s", e, exc_info=True)
             return {"status": "error", "reason": str(e)}
 
+    def close_position_or_raise(self, symbol: str, sz: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Close position by symbol (market). If sz is provided, attempts to close that size; otherwise closes entire position.
+
+        Raises Exception on failure or if position remains open beyond a tiny dust threshold.
+        """
+        if self._exchange is None or self._info is None:
+            raise RuntimeError("sdk_not_initialized")
+
+        hl_symbol = _normalize_symbol(symbol)
+        try:
+            resp = self._exchange.market_close(hl_symbol, sz=sz) if sz is not None else self._exchange.market_close(hl_symbol)
+        except Exception as exc:
+            raise RuntimeError(f"market_close_failed:{exc}") from exc
+
+        if resp.get("status") != "ok":
+            raise RuntimeError(f"market_close_rejected:{resp}")
+
+        # Re-query position to confirm flat (allow tiny dust)
+        positions = self.get_open_positions(symbol)
+        for pos in positions:
+            if pos.get("symbol") == symbol and abs(float(pos.get("size", 0.0))) > 1e-6:
+                raise RuntimeError(f"market_close_incomplete:size={pos.get('size')}")
+
+        return resp
+
     def place_limit_order(
         self,
         symbol: str,

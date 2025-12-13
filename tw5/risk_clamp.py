@@ -190,7 +190,7 @@ def clamp_order_plan(
     max_stop_pct = _safe_float(getattr(config, "tw5_max_stop_pct", 0.05), 0.05)
     max_stop_pct = max(0.001, min(max_stop_pct, 0.10))  # between 0.1% and 10%
 
-    # 6) Prepare legs: shrink stops if needed, normalise size_fracs
+    # 6) Prepare legs: shrink stops if needed, normalise size_fracs. Take-profits may be empty; executor applies exits.
     valid_legs: List[OrderLeg] = []
     for leg in plan.legs:
         if leg.size_frac <= 0.0 or leg.entry_price <= 0.0:
