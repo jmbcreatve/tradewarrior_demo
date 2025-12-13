@@ -300,6 +300,8 @@ class Tw5Executor:
             remaining_fracs=getattr(config, "tw5_tp_remaining_fracs", [0.30, 0.30, 1.0]),
         )
 
+        stop_mode = str(getattr(config, "tw5_stop_order_mode", "stop_market"))
+        stop_is_market = stop_mode != "stop_limit"
         stop_resp = self._adapter.place_trigger_order(
             symbol=snapshot.symbol,
             is_buy=(plan.side == "short"),
@@ -307,10 +309,19 @@ class Tw5Executor:
             trigger_px=stop_loss,
             reduce_only=True,
             tpsl="sl",
-            is_market=True,
+            is_market=stop_is_market,
             limit_px=stop_loss,
         )
         stop_oid = _extract_oid(stop_resp)
+        self._log_stop_placement(
+            symbol=snapshot.symbol,
+            stop_mode=stop_mode,
+            trigger_px=stop_loss,
+            limit_px=stop_loss,
+            is_market=stop_is_market,
+            reduce_only=True,
+            oid=stop_oid,
+        )
         if stop_oid is None:
             logger.critical("TW-5 executor: stop placement failed, attempting emergency flatten.")
             exec_state.last_error = "stop_place_failed"
@@ -420,6 +431,8 @@ class Tw5Executor:
             logger.info("TW-5 executor: cancelling old stop oid=%s", exec_state.stop_oid)
             self._cancel_orders(exec_state.symbol, [exec_state.stop_oid])
 
+        stop_mode = str(getattr(config, "tw5_stop_order_mode", "stop_market"))
+        stop_is_market = stop_mode != "stop_limit"
         stop_resp = self._adapter.place_trigger_order(
             symbol=exec_state.symbol,
             is_buy=(exec_state.side == "short"),
@@ -427,10 +440,19 @@ class Tw5Executor:
             trigger_px=desired_stop,
             reduce_only=True,
             tpsl="sl",
-            is_market=True,
+            is_market=stop_is_market,
             limit_px=desired_stop,
         )
         exec_state.stop_oid = _extract_oid(stop_resp)
+        self._log_stop_placement(
+            symbol=exec_state.symbol,
+            stop_mode=stop_mode,
+            trigger_px=desired_stop,
+            limit_px=desired_stop,
+            is_market=stop_is_market,
+            reduce_only=True,
+            oid=exec_state.stop_oid,
+        )
         exec_state.last_manage_ts = now
         exec_state.stop_current = desired_stop
         exec_state.last_action = "stop_tightened"
@@ -514,6 +536,39 @@ class Tw5Executor:
         except Exception as e:
             logger.critical("TW-5 executor: EMERGENCY FLATTEN failed: %s", e, exc_info=True)
             raise
+
+    def _log_stop_placement(
+        self,
+        symbol: str,
+        stop_mode: str,
+        trigger_px: float,
+        limit_px: float,
+        is_market: bool,
+        reduce_only: bool,
+        oid: Any,
+    ) -> None:
+        logger.info(
+            "TW-5 executor: placed stop (mode=%s trigger=%.6f limit=%.6f is_market=%s reduce_only=%s oid=%s)",
+            stop_mode,
+            trigger_px,
+            limit_px,
+            is_market,
+            reduce_only,
+            oid,
+        )
+        try:
+            open_orders = self._get_open_orders(symbol)
+            if not open_orders:
+                return
+            match = None
+            for order in open_orders:
+                if order.get("oid") == oid:
+                    match = order
+                    break
+            if match is not None:
+                logger.info("TW-5 executor: stop verification snapshot oid=%s order=%s", oid, match)
+        except Exception:
+            logger.debug("TW-5 executor: unable to verify stop order on book.", exc_info=True)
 
 
 def _collect_tracked_oids(exec_state: ExecutionState) -> List[Any]:
